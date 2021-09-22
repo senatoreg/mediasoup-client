@@ -24,6 +24,7 @@
   "scripts": {
     "typescript:build": "node npm-scripts.js typescript:build",
     "typescript:watch": "node npm-scripts.js typescript:watch",
+    "build:browser": "rm -rf dist && npx gulp build",
     "lint": "node npm-scripts.js lint",
     "test": "node npm-scripts.js test",
     "coverage": "node npm-scripts.js coverage",
@@ -47,15 +48,21 @@
     "supports-color": "^8.1.1"
   },
   "devDependencies": {
+    "@rollup/plugin-commonjs": "^20.0.0",
+    "@rollup/plugin-node-resolve": "^13.0.5",
     "@types/sdp-transform": "^2.4.5",
     "@types/uuid": "^3.4.9",
     "@typescript-eslint/eslint-plugin": "^4.31.0",
     "@typescript-eslint/parser": "^4.31.0",
     "eslint": "^7.32.0",
     "eslint-plugin-jest": "^24.4.0",
+    "gulp": "^4.0.2",
     "jest": "^27.1.1",
     "jest-tobetype": "^1.2.3",
     "open-cli": "^6.0.1",
+    "rollup-plugin-node-builtins": "^2.1.2",
+    "rollup-plugin-node-globals": "^1.4.0",
+    "rollup-plugin-terser": "^7.0.2",
     "tsc-watch": "^4.5.0",
     "typescript": "^3.8",
     "uuid": "^3.4.0"
