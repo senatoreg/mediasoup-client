@@ -25,6 +25,7 @@
     "typescript:build": "node npm-scripts.js typescript:build",
     "typescript:watch": "node npm-scripts.js typescript:watch",
     "build:browser": "rm -rf dist && npx gulp build",
+    "build": "node npm-scripts.js typescript:build && npm run build:browser",
     "lint": "node npm-scripts.js lint",
     "test": "node npm-scripts.js test",
     "coverage": "node npm-scripts.js coverage",
