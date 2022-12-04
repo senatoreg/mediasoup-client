@@ -18,15 +18,20 @@ import {
 	HandlerReceiveDataChannelResult
 } from './HandlerInterface';
 import { RemoteSdp } from './sdp/RemoteSdp';
+import { parse as parseScalabilityMode } from '../scalabilityModes';
 import { IceParameters, DtlsRole } from '../Transport';
-import { RtpCapabilities, RtpParameters } from '../RtpParameters';
+import {
+	RtpCapabilities,
+	RtpParameters,
+	RtpEncodingParameters
+} from '../RtpParameters';
 import { SctpCapabilities, SctpStreamParameters } from '../SctpParameters';
 
-const logger = new Logger('Safari12');
+const logger = new Logger('ReactNativeUnifiedPlan');
 
 const SCTP_NUM_STREAMS = { OS: 1024, MIS: 1024 };
 
-export class Safari12 extends HandlerInterface
+export class ReactNativeUnifiedPlan extends HandlerInterface
 {
 	// Handler direction.
 	private _direction?: 'send' | 'recv';
@@ -59,7 +64,7 @@ export class Safari12 extends HandlerInterface
 	 */
 	static createFactory(): HandlerFactory
 	{
-		return (): Safari12 => new Safari12();
+		return (): ReactNativeUnifiedPlan => new ReactNativeUnifiedPlan();
 	}
 
 	constructor()
@@ -69,12 +74,17 @@ export class Safari12 extends HandlerInterface
 
 	get name(): string
 	{
-		return 'Safari12';
+		return 'ReactNativeUnifiedPlan';
 	}
 
 	close(): void
 	{
 		logger.debug('close()');
+
+		// Free/dispose native MediaStream but DO NOT free/dispose native
+		// MediaStreamTracks (that is parent's business).
+		// @ts-ignore (proprietary API in react-native-webrtc).
+		this._sendStream.release(/* releaseTracks */ false);
 
 		// Close RTCPeerConnection.
 		if (this._pc)
@@ -95,7 +105,8 @@ export class Safari12 extends HandlerInterface
 				iceServers         : [],
 				iceTransportPolicy : 'all',
 				bundlePolicy       : 'max-bundle',
-				rtcpMuxPolicy      : 'require'
+				rtcpMuxPolicy      : 'require',
+				sdpSemantics       : 'unified-plan'
 			});
 
 		try
@@ -184,6 +195,7 @@ export class Safari12 extends HandlerInterface
 				iceTransportPolicy : iceTransportPolicy || 'all',
 				bundlePolicy       : 'max-bundle',
 				rtcpMuxPolicy      : 'require',
+				sdpSemantics       : 'unified-plan',
 				...additionalSettings
 			},
 			proprietaryConstraints);
@@ -285,6 +297,14 @@ export class Safari12 extends HandlerInterface
 
 		logger.debug('send() [kind:%s, track.id:%s]', track.kind, track.id);
 
+		if (encodings && encodings.length > 1)
+		{
+			encodings.forEach((encoding: RtpEncodingParameters, idx: number) =>
+			{
+				encoding.rid = `r${idx}`;
+			});
+		}
+
 		const sendingRtpParameters =
 			utils.clone(this._sendingRtpParametersByKind![track.kind], {});
 
@@ -301,7 +321,12 @@ export class Safari12 extends HandlerInterface
 
 		const mediaSectionIdx = this._remoteSdp!.getNextMediaSectionIdx();
 		const transceiver = this._pc.addTransceiver(
-			track, { direction: 'sendonly', streams: [ this._sendStream ] });
+			track,
+			{
+				direction     : 'sendonly',
+				streams       : [ this._sendStream ],
+				sendEncodings : encodings
+			});
 		let offer = await this._pc.createOffer();
 		let localSdpObject = sdpTransform.parse(offer.sdp);
 		let offerMediaObject;
@@ -315,17 +340,29 @@ export class Safari12 extends HandlerInterface
 				});
 		}
 
-		if (encodings && encodings.length > 1)
-		{
-			logger.debug('send() | enabling legacy simulcast');
+		// Special case for VP9 with SVC.
+		let hackVp9Svc = false;
 
+		const layers =
+			parseScalabilityMode((encodings || [ {} ])[0].scalabilityMode);
+
+		if (
+			encodings &&
+			encodings.length === 1 &&
+			layers.spatialLayers > 1 &&
+			sendingRtpParameters.codecs[0].mimeType.toLowerCase() === 'video/vp9'
+		)
+		{
+			logger.debug('send() | enabling legacy simulcast for VP9 SVC');
+
+			hackVp9Svc = true;
 			localSdpObject = sdpTransform.parse(offer.sdp);
 			offerMediaObject = localSdpObject.media[mediaSectionIdx.idx];
 
 			sdpUnifiedPlanUtils.addLegacySimulcast(
 				{
 					offerMediaObject,
-					numStreams : encodings.length
+					numStreams : layers.spatialLayers
 				});
 
 			offer = { type: 'offer', sdp: sdpTransform.write(localSdpObject) };
@@ -350,18 +387,31 @@ export class Safari12 extends HandlerInterface
 		sendingRtpParameters.rtcp.cname =
 			sdpCommonUtils.getCname({ offerMediaObject });
 
-		// Set RTP encodings.
-		sendingRtpParameters.encodings =
-			sdpUnifiedPlanUtils.getRtpEncodings({ offerMediaObject });
-
-		// Complete encodings with given values.
-		if (encodings)
+		// Set RTP encodings by parsing the SDP offer if no encodings are given.
+		if (!encodings)
 		{
-			for (let idx = 0; idx < sendingRtpParameters.encodings.length; ++idx)
-			{
-				if (encodings[idx])
-					Object.assign(sendingRtpParameters.encodings[idx], encodings[idx]);
-			}
+			sendingRtpParameters.encodings =
+				sdpUnifiedPlanUtils.getRtpEncodings({ offerMediaObject });
+		}
+		// Set RTP encodings by parsing the SDP offer and complete them with given
+		// one if just a single encoding has been given.
+		else if (encodings.length === 1)
+		{
+			let newEncodings =
+				sdpUnifiedPlanUtils.getRtpEncodings({ offerMediaObject });
+
+			Object.assign(newEncodings[0], encodings[0]);
+
+			// Hack for VP9 SVC.
+			if (hackVp9Svc)
+				newEncodings = [ newEncodings[0] ];
+
+			sendingRtpParameters.encodings = newEncodings;
+		}
+		// Otherwise if more than 1 encoding are given use them verbatim.
+		else
+		{
+			sendingRtpParameters.encodings = encodings;
 		}
 
 		// If VP8 or H264 and there is effective simulcast, add scalabilityMode to
@@ -386,7 +436,8 @@ export class Safari12 extends HandlerInterface
 				reuseMid            : mediaSectionIdx.reuseMid,
 				offerRtpParameters  : sendingRtpParameters,
 				answerRtpParameters : sendingRemoteRtpParameters,
-				codecOptions
+				codecOptions,
+				extmapAllowMixed    : true
 			});
 
 		const answer = { type: 'answer', sdp: this._remoteSdp!.getSdp() };
@@ -449,7 +500,6 @@ export class Safari12 extends HandlerInterface
 		this._mapMidTransceiver.delete(localId);
 	}
 
-	// eslint-disable-next-line @typescript-eslint/no-unused-vars
 	async pauseSending(localId: string): Promise<void>
 	{
 		this._assertSendDirection();
@@ -481,7 +531,6 @@ export class Safari12 extends HandlerInterface
 		await this._pc.setRemoteDescription(answer);
 	}
 
-	// eslint-disable-next-line @typescript-eslint/no-unused-vars
 	async resumeSending(localId: string): Promise<void>
 	{
 		this._assertSendDirection();
@@ -490,11 +539,12 @@ export class Safari12 extends HandlerInterface
 
 		const transceiver = this._mapMidTransceiver.get(localId);
 
+		this._remoteSdp!.resumeSendingMediaSection(localId);
+
 		if (!transceiver)
 			throw new Error('associated RTCRtpTransceiver not found');
 
 		transceiver.direction = 'sendonly';
-		this._remoteSdp!.resumeSendingMediaSection(localId);
 
 		const offer = await this._pc.createOffer();
 
@@ -757,16 +807,20 @@ export class Safari12 extends HandlerInterface
 				.find((t: RTCRtpTransceiver) => t.mid === localId);
 
 			if (!transceiver)
+			{
 				throw new Error('new RTCRtpTransceiver not found');
+			}
+			else
+			{
+				// Store in the map.
+				this._mapMidTransceiver.set(localId, transceiver);
 
-			// Store in the map.
-			this._mapMidTransceiver.set(localId, transceiver);
-
-			results.push({
-				localId,
-				track       : transceiver.receiver.track,
-				rtpReceiver : transceiver.receiver
-			});
+				results.push({
+					localId,
+					track       : transceiver.receiver.track,
+					rtpReceiver : transceiver.receiver
+				});
+			}
 		}
 
 		return results;

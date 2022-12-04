@@ -622,7 +622,8 @@ export class ReactNative extends HandlerInterface
 			// NOTE: In React-Native we cannot reuse the same remote MediaStream for new
 			// remote tracks. This is because react-native-webrtc does not react on new
 			// tracks generated within already existing streams, so force the streamId
-			// to be different.
+			// to be different. See:
+			// https://github.com/react-native-webrtc/react-native-webrtc/issues/401
 			logger.debug(
 				'receive() | forcing a random remote streamId to avoid well known bug in react-native-webrtc');
 
