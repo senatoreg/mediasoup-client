@@ -1,4 +1,5 @@
 import { AwaitQueue } from 'awaitqueue';
+import queueMicrotask from 'queue-microtask';
 import { Logger } from './Logger';
 import { EnhancedEventEmitter } from './EnhancedEventEmitter';
 import { UnsupportedError, InvalidStateError } from './errors';
@@ -11,36 +12,11 @@ import { DataProducer, DataProducerOptions } from './DataProducer';
 import { DataConsumer, DataConsumerOptions } from './DataConsumer';
 import { RtpParameters, MediaKind } from './RtpParameters';
 import { SctpParameters, SctpStreamParameters } from './SctpParameters';
+import { AppData } from './types';
 
 const logger = new Logger('Transport');
 
-interface InternalTransportOptions extends TransportOptions
-{
-	direction: 'send' | 'recv';
-	handlerFactory: HandlerFactory;
-	extendedRtpCapabilities: any;
-	canProduceByKind: CanProduceByKind;
-}
-
-class ConsumerCreationTask
-{
-	consumerOptions: ConsumerOptions;
-	promise: Promise<Consumer>;
-	resolve?: (consumer: Consumer) => void;
-	reject?: (error: Error) => void;
-
-	constructor(consumerOptions: ConsumerOptions)
-	{
-		this.consumerOptions = consumerOptions;
-		this.promise = new Promise<Consumer>((resolve, reject) =>
-		{
-			this.resolve = resolve;
-			this.reject = reject;
-		});
-	}
-}
-
-export type TransportOptions =
+export type TransportOptions<TransportAppData extends AppData = AppData> =
 {
 	id: string;
 	iceParameters: IceParameters;
@@ -51,7 +27,7 @@ export type TransportOptions =
 	iceTransportPolicy?: RTCIceTransportPolicy;
 	additionalSettings?: any;
 	proprietaryConstraints?: any;
-	appData?: Record<string, unknown>;
+	appData?: TransportAppData;
 };
 
 export type CanProduceByKind =
@@ -107,7 +83,7 @@ export type IceCandidate =
 	/**
 	 * The type of TCP candidate.
 	 */
-	tcpType: 'active' | 'passive' | 'so';
+	tcpType?: 'active' | 'passive' | 'so';
 };
 
 export type DtlsParameters =
@@ -160,7 +136,7 @@ export type TransportEvents =
 		{
 			kind: MediaKind;
 			rtpParameters: RtpParameters;
-			appData: Record<string, unknown>;
+			appData: AppData;
 		},
 		({ id }: { id: string }) => void,
 		(error: Error) => void
@@ -171,7 +147,7 @@ export type TransportEvents =
 			sctpStreamParameters: SctpStreamParameters;
 			label?: string;
 			protocol?: string;
-			appData: Record<string, unknown>;
+			appData: AppData;
 		},
 		({ id }: { id: string }) => void,
 		(error: Error) => void
@@ -187,7 +163,26 @@ export type TransportObserverEvents =
 	newdataconsumer: [DataConsumer];
 };
 
-export class Transport extends EnhancedEventEmitter<TransportEvents>
+class ConsumerCreationTask
+{
+	consumerOptions: ConsumerOptions;
+	promise: Promise<Consumer>;
+	resolve?: (consumer: Consumer) => void;
+	reject?: (error: Error) => void;
+
+	constructor(consumerOptions: ConsumerOptions)
+	{
+		this.consumerOptions = consumerOptions;
+		this.promise = new Promise((resolve, reject) =>
+		{
+			this.resolve = resolve;
+			this.reject = reject;
+		});
+	}
+}
+
+export class Transport<TransportAppData extends AppData = AppData>
+	extends EnhancedEventEmitter<TransportEvents>
 {
 	// Id.
 	private readonly _id: string;
@@ -207,7 +202,7 @@ export class Transport extends EnhancedEventEmitter<TransportEvents>
 	// Transport connection state.
 	private _connectionState: ConnectionState = 'new';
 	// App custom data.
-	private readonly _appData: Record<string, unknown>;
+	private _appData: TransportAppData;
 	// Map of Producers indexed by id.
 	private readonly _producers: Map<string, Producer> = new Map();
 	// Map of Consumers indexed by id.
@@ -255,7 +250,13 @@ export class Transport extends EnhancedEventEmitter<TransportEvents>
 			handlerFactory,
 			extendedRtpCapabilities,
 			canProduceByKind
-		}: InternalTransportOptions
+		}:
+		{
+			direction: 'send' | 'recv';
+			handlerFactory: HandlerFactory;
+			extendedRtpCapabilities: any;
+			canProduceByKind: CanProduceByKind;
+		} & TransportOptions<TransportAppData>
 	)
 	{
 		super();
@@ -294,7 +295,7 @@ export class Transport extends EnhancedEventEmitter<TransportEvents>
 				extendedRtpCapabilities
 			});
 
-		this._appData = appData || {};
+		this._appData = appData || {} as TransportAppData;
 
 		this.handleHandler();
 	}
@@ -342,18 +343,17 @@ export class Transport extends EnhancedEventEmitter<TransportEvents>
 	/**
 	 * App custom data.
 	 */
-	get appData(): Record<string, unknown>
+	get appData(): TransportAppData
 	{
 		return this._appData;
 	}
 
 	/**
-	 * Invalid setter.
+	 * App custom data setter.
 	 */
-	// eslint-disable-next-line @typescript-eslint/no-unused-vars
-	set appData(appData: Record<string, unknown>)
+	set appData(appData: TransportAppData)
 	{
-		throw new Error('cannot override appData object');
+		this._appData = appData;
 	}
 
 	get observer(): EnhancedEventEmitter
@@ -367,7 +367,9 @@ export class Transport extends EnhancedEventEmitter<TransportEvents>
 	close(): void
 	{
 		if (this._closed)
+		{
 			return;
+		}
 
 		logger.debug('close()');
 
@@ -419,7 +421,9 @@ export class Transport extends EnhancedEventEmitter<TransportEvents>
 	async getStats(): Promise<RTCStatsReport>
 	{
 		if (this._closed)
+		{
 			throw new InvalidStateError('closed');
+		}
 
 		return this._handler.getTransportStats();
 	}
@@ -435,9 +439,13 @@ export class Transport extends EnhancedEventEmitter<TransportEvents>
 		logger.debug('restartIce()');
 
 		if (this._closed)
+		{
 			throw new InvalidStateError('closed');
+		}
 		else if (!iceParameters)
+		{
 			throw new TypeError('missing iceParameters');
+		}
 
 		// Enqueue command.
 		return this._awaitQueue.push(
@@ -456,9 +464,13 @@ export class Transport extends EnhancedEventEmitter<TransportEvents>
 		logger.debug('updateIceServers()');
 
 		if (this._closed)
+		{
 			throw new InvalidStateError('closed');
+		}
 		else if (!Array.isArray(iceServers))
+		{
 			throw new TypeError('missing iceServers');
+		}
 
 		// Enqueue command.
 		return this._awaitQueue.push(
@@ -469,7 +481,7 @@ export class Transport extends EnhancedEventEmitter<TransportEvents>
 	/**
 	 * Create a Producer.
 	 */
-	async produce(
+	async produce<ProducerAppData extends AppData = AppData>(
 		{
 			track,
 			encodings,
@@ -478,28 +490,44 @@ export class Transport extends EnhancedEventEmitter<TransportEvents>
 			stopTracks = true,
 			disableTrackOnPause = true,
 			zeroRtpOnPause = false,
-			appData = {}
-		}: ProducerOptions = {}
-	): Promise<Producer>
+			appData = {} as ProducerAppData
+		}: ProducerOptions<ProducerAppData> = {}
+	): Promise<Producer<ProducerAppData>>
 	{
 		logger.debug('produce() [track:%o]', track);
 
 		if (this._closed)
+		{
 			throw new InvalidStateError('closed');
+		}
 		else if (!track)
+		{
 			throw new TypeError('missing track');
+		}
 		else if (this._direction !== 'send')
+		{
 			throw new UnsupportedError('not a sending Transport');
+		}
 		else if (!this._canProduceByKind[track.kind])
+		{
 			throw new UnsupportedError(`cannot produce ${track.kind}`);
+		}
 		else if (track.readyState === 'ended')
+		{
 			throw new InvalidStateError('track ended');
+		}
 		else if (this.listenerCount('connect') === 0 && this._connectionState === 'new')
+		{
 			throw new TypeError('no "connect" listener set into this transport');
+		}
 		else if (this.listenerCount('produce') === 0)
+		{
 			throw new TypeError('no "produce" listener set into this transport');
+		}
 		else if (appData && typeof appData !== 'object')
+		{
 			throw new TypeError('if given, appData must be an object');
+		}
 
 		// Enqueue command.
 		return this._awaitQueue.push(
@@ -523,23 +551,41 @@ export class Transport extends EnhancedEventEmitter<TransportEvents>
 							const normalizedEncoding: any = { active: true };
 
 							if (encoding.active === false)
+							{
 								normalizedEncoding.active = false;
+							}
 							if (typeof encoding.dtx === 'boolean')
+							{
 								normalizedEncoding.dtx = encoding.dtx;
+							}
 							if (typeof encoding.scalabilityMode === 'string')
+							{
 								normalizedEncoding.scalabilityMode = encoding.scalabilityMode;
+							}
 							if (typeof encoding.scaleResolutionDownBy === 'number')
+							{
 								normalizedEncoding.scaleResolutionDownBy = encoding.scaleResolutionDownBy;
+							}
 							if (typeof encoding.maxBitrate === 'number')
+							{
 								normalizedEncoding.maxBitrate = encoding.maxBitrate;
+							}
 							if (typeof encoding.maxFramerate === 'number')
+							{
 								normalizedEncoding.maxFramerate = encoding.maxFramerate;
+							}
 							if (typeof encoding.adaptivePtime === 'boolean')
+							{
 								normalizedEncoding.adaptivePtime = encoding.adaptivePtime;
+							}
 							if (typeof encoding.priority === 'string')
+							{
 								normalizedEncoding.priority = encoding.priority;
+							}
 							if (typeof encoding.networkPriority === 'string')
+							{
 								normalizedEncoding.networkPriority = encoding.networkPriority;
+							}
 
 							return normalizedEncoding;
 						});
@@ -572,7 +618,7 @@ export class Transport extends EnhancedEventEmitter<TransportEvents>
 						);
 					});
 
-					const producer = new Producer(
+					const producer = new Producer<ProducerAppData>(
 						{
 							id,
 							localId,
@@ -619,42 +665,58 @@ export class Transport extends EnhancedEventEmitter<TransportEvents>
 	/**
 	 * Create a Consumer to consume a remote Producer.
 	 */
-	async consume(
+	async consume<ConsumerAppData extends AppData = AppData>(
 		{
 			id,
 			producerId,
 			kind,
 			rtpParameters,
 			streamId,
-			appData = {}
-		}: ConsumerOptions
-	): Promise<Consumer>
+			appData = {} as ConsumerAppData
+		}: ConsumerOptions<ConsumerAppData>
+	): Promise<Consumer<ConsumerAppData>>
 	{
 		logger.debug('consume()');
 
 		rtpParameters = utils.clone(rtpParameters, undefined);
 
 		if (this._closed)
+		{
 			throw new InvalidStateError('closed');
+		}
 		else if (this._direction !== 'recv')
+		{
 			throw new UnsupportedError('not a receiving Transport');
+		}
 		else if (typeof id !== 'string')
+		{
 			throw new TypeError('missing id');
+		}
 		else if (typeof producerId !== 'string')
+		{
 			throw new TypeError('missing producerId');
+		}
 		else if (kind !== 'audio' && kind !== 'video')
+		{
 			throw new TypeError(`invalid kind '${kind}'`);
+		}
 		else if (this.listenerCount('connect') === 0 && this._connectionState === 'new')
+		{
 			throw new TypeError('no "connect" listener set into this transport');
+		}
 		else if (appData && typeof appData !== 'object')
+		{
 			throw new TypeError('if given, appData must be an object');
+		}
 
 		// Ensure the device can consume it.
 		const canConsume = ortc.canReceive(
 			rtpParameters, this._extendedRtpCapabilities);
 
 		if (!canConsume)
+		{
 			throw new UnsupportedError('cannot consume this Producer');
+		}
 
 		const consumerCreationTask = new ConsumerCreationTask(
 			{
@@ -671,45 +733,67 @@ export class Transport extends EnhancedEventEmitter<TransportEvents>
 		this._pendingConsumerTasks.push(consumerCreationTask);
 
 		// There is no Consumer creation in progress, create it now.
-		if (this._consumerCreationInProgress === false)
+		queueMicrotask(() => 
 		{
-			this.createPendingConsumers();
-		}
+			if (this._closed)
+			{
+				return;
+			}
 
-		return consumerCreationTask.promise;
+			if (this._consumerCreationInProgress === false)
+			{
+				this.createPendingConsumers<ConsumerAppData>();
+			}
+		});
+
+		return consumerCreationTask.promise as Promise<Consumer<ConsumerAppData>>;
 	}
 
 	/**
 	 * Create a DataProducer
 	 */
-	async produceData(
+	async produceData<DataProducerAppData extends AppData = AppData>(
 		{
 			ordered = true,
 			maxPacketLifeTime,
 			maxRetransmits,
 			label = '',
 			protocol = '',
-			appData = {}
-		}: DataProducerOptions = {}
-	): Promise<DataProducer>
+			appData = {} as DataProducerAppData
+		}: DataProducerOptions<DataProducerAppData> = {}
+	): Promise<DataProducer<DataProducerAppData>>
 	{
 		logger.debug('produceData()');
 
 		if (this._closed)
+		{
 			throw new InvalidStateError('closed');
+		}
 		else if (this._direction !== 'send')
+		{
 			throw new UnsupportedError('not a sending Transport');
+		}
 		else if (!this._maxSctpMessageSize)
+		{
 			throw new UnsupportedError('SCTP not enabled by remote Transport');
+		}
 		else if (this.listenerCount('connect') === 0 && this._connectionState === 'new')
+		{
 			throw new TypeError('no "connect" listener set into this transport');
+		}
 		else if (this.listenerCount('producedata') === 0)
+		{
 			throw new TypeError('no "producedata" listener set into this transport');
+		}
 		else if (appData && typeof appData !== 'object')
+		{
 			throw new TypeError('if given, appData must be an object');
+		}
 
 		if (maxPacketLifeTime || maxRetransmits)
+		{
 			ordered = false;
+		}
 
 		// Enqueue command.
 		return this._awaitQueue.push(
@@ -745,8 +829,13 @@ export class Transport extends EnhancedEventEmitter<TransportEvents>
 					);
 				});
 
-				const dataProducer =
-					new DataProducer({ id, dataChannel, sctpStreamParameters, appData });
+				const dataProducer = new DataProducer<DataProducerAppData>(
+					{
+						id,
+						dataChannel,
+						sctpStreamParameters,
+						appData
+					});
 
 				this._dataProducers.set(dataProducer.id, dataProducer);
 				this.handleDataProducer(dataProducer);
@@ -762,35 +851,49 @@ export class Transport extends EnhancedEventEmitter<TransportEvents>
 	/**
 	 * Create a DataConsumer
 	 */
-	async consumeData(
+	async consumeData<ConsumerAppData extends AppData = AppData>(
 		{
 			id,
 			dataProducerId,
 			sctpStreamParameters,
 			label = '',
 			protocol = '',
-			appData = {}
-		}: DataConsumerOptions
-	): Promise<DataConsumer>
+			appData = {} as ConsumerAppData
+		}: DataConsumerOptions<ConsumerAppData>
+	): Promise<DataConsumer<ConsumerAppData>>
 	{
 		logger.debug('consumeData()');
 
 		sctpStreamParameters = utils.clone(sctpStreamParameters, undefined);
 
 		if (this._closed)
+		{
 			throw new InvalidStateError('closed');
+		}
 		else if (this._direction !== 'recv')
+		{
 			throw new UnsupportedError('not a receiving Transport');
+		}
 		else if (!this._maxSctpMessageSize)
+		{
 			throw new UnsupportedError('SCTP not enabled by remote Transport');
+		}
 		else if (typeof id !== 'string')
+		{
 			throw new TypeError('missing id');
+		}
 		else if (typeof dataProducerId !== 'string')
+		{
 			throw new TypeError('missing dataProducerId');
+		}
 		else if (this.listenerCount('connect') === 0 && this._connectionState === 'new')
+		{
 			throw new TypeError('no "connect" listener set into this transport');
+		}
 		else if (appData && typeof appData !== 'object')
+		{
 			throw new TypeError('if given, appData must be an object');
+		}
 
 		// This may throw.
 		ortc.validateSctpStreamParameters(sctpStreamParameters);
@@ -808,7 +911,7 @@ export class Transport extends EnhancedEventEmitter<TransportEvents>
 						protocol
 					});
 
-				const dataConsumer = new DataConsumer(
+				const dataConsumer = new DataConsumer<ConsumerAppData>(
 					{
 						id,
 						dataProducerId,
@@ -829,7 +932,7 @@ export class Transport extends EnhancedEventEmitter<TransportEvents>
 	}
 
 	// This method is guaranteed to never throw.
-	private async createPendingConsumers(): Promise<void>
+	private async createPendingConsumers<ConsumerAppData extends AppData>(): Promise<void>
 	{
 		this._consumerCreationInProgress = true;
 
@@ -871,13 +974,13 @@ export class Transport extends EnhancedEventEmitter<TransportEvents>
 				{
 					const results = await this._handler.receive(optionsList);
 
-					for (let idx=0; idx < results.length; idx++)
+					for (let idx = 0; idx < results.length; ++idx)
 					{
 						const task = pendingConsumerTasks[idx];
 						const result = results[idx];
 						const { id, producerId, kind, rtpParameters, appData } = task.consumerOptions;
 						const { localId, rtpReceiver, track } = result;
-						const consumer = new Consumer(
+						const consumer = new Consumer<ConsumerAppData>(
 							{
 								id         : id!,
 								localId,
@@ -885,7 +988,7 @@ export class Transport extends EnhancedEventEmitter<TransportEvents>
 								rtpReceiver,
 								track,
 								rtpParameters,
-								appData
+								appData    : appData as ConsumerAppData
 							});
 
 						this._consumers.set(consumer.id, consumer);
@@ -893,7 +996,10 @@ export class Transport extends EnhancedEventEmitter<TransportEvents>
 
 						// If this is the first video Consumer and the Consumer for RTP probation
 						// has not yet been created, it's time to create it.
-						if (!this._probatorConsumerCreated && !videoConsumerForProbator && kind === 'video')
+						if (
+							!this._probatorConsumerCreated &&
+							!videoConsumerForProbator && kind === 'video'
+						)
 						{
 							videoConsumerForProbator = consumer;
 						}
@@ -947,7 +1053,7 @@ export class Transport extends EnhancedEventEmitter<TransportEvents>
 				// There are pending Consumer tasks, enqueue their creation.
 				if (this._pendingConsumerTasks.length > 0)
 				{
-					this.createPendingConsumers();
+					this.createPendingConsumers<ConsumerAppData>();
 				}
 			})
 			// NOTE: We only get here when the await queue is closed.
@@ -1114,14 +1220,18 @@ export class Transport extends EnhancedEventEmitter<TransportEvents>
 		handler.on('@connectionstatechange', (connectionState: ConnectionState) =>
 		{
 			if (connectionState === this._connectionState)
+			{
 				return;
+			}
 
 			logger.debug('connection state changed to %s', connectionState);
 
 			this._connectionState = connectionState;
 
 			if (!this._closed)
+			{
 				this.safeEmit('connectionstatechange', connectionState);
+			}
 		});
 	}
 
@@ -1132,7 +1242,9 @@ export class Transport extends EnhancedEventEmitter<TransportEvents>
 			this._producers.delete(producer.id);
 
 			if (this._closed)
+			{
 				return;
+			}
 
 			this._awaitQueue.push(
 				async () => this._handler.stopSending(producer.localId),
@@ -1190,7 +1302,9 @@ export class Transport extends EnhancedEventEmitter<TransportEvents>
 		producer.on('@getstats', (callback, errback) =>
 		{
 			if (this._closed)
+			{
 				return errback!(new InvalidStateError('closed'));
+			}
 
 			this._handler.getSenderStats(producer.localId)
 				.then(callback)
@@ -1207,7 +1321,9 @@ export class Transport extends EnhancedEventEmitter<TransportEvents>
 			this._pendingResumeConsumers.delete(consumer.id);
 
 			if (this._closed)
+			{
 				return;
+			}
 
 			// Store the Consumer into the close list.
 			this._pendingCloseConsumers.set(consumer.id, consumer);
@@ -1231,10 +1347,18 @@ export class Transport extends EnhancedEventEmitter<TransportEvents>
 			this._pendingPauseConsumers.set(consumer.id, consumer);
 
 			// There is no Consumer pause in progress, do it now.
-			if (this._consumerPauseInProgress === false)
+			queueMicrotask(() => 
 			{
-				this.pausePendingConsumers();
-			}
+				if (this._closed)
+				{
+					return;
+				}
+
+				if (this._consumerPauseInProgress === false)
+				{
+					this.pausePendingConsumers();
+				}
+			});
 		});
 
 		consumer.on('@resume', () =>
@@ -1249,16 +1373,26 @@ export class Transport extends EnhancedEventEmitter<TransportEvents>
 			this._pendingResumeConsumers.set(consumer.id, consumer);
 
 			// There is no Consumer resume in progress, do it now.
-			if (this._consumerResumeInProgress === false)
+			queueMicrotask(() => 
 			{
-				this.resumePendingConsumers();
-			}
+				if (this._closed)
+				{
+					return;
+				}
+
+				if (this._consumerResumeInProgress === false)
+				{
+					this.resumePendingConsumers();
+				}
+			});
 		});
 
 		consumer.on('@getstats', (callback, errback) =>
 		{
 			if (this._closed)
+			{
 				return errback!(new InvalidStateError('closed'));
+			}
 
 			this._handler.getReceiverStats(consumer.localId)
 				.then(callback)

@@ -7,10 +7,11 @@ import {
 	RtpParameters,
 	RtpEncodingParameters
 } from './RtpParameters';
+import { AppData } from './types';
 
 const logger = new Logger('Producer');
 
-export type ProducerOptions =
+export type ProducerOptions<ProducerAppData extends AppData = AppData> =
 {
 	track?: MediaStreamTrack;
 	encodings?: RtpEncodingParameters[];
@@ -19,7 +20,7 @@ export type ProducerOptions =
 	stopTracks?: boolean;
 	disableTrackOnPause?: boolean;
 	zeroRtpOnPause?: boolean;
-	appData?: Record<string, unknown>;
+	appData?: ProducerAppData;
 };
 
 // https://mediasoup.org/documentation/v3/mediasoup-client/api/#ProducerCodecOptions
@@ -31,6 +32,7 @@ export type ProducerCodecOptions =
 	opusMaxPlaybackRate?: number;
 	opusMaxAverageBitrate?: number;
 	opusPtime?: number;
+	opusNack?: boolean;
 	videoGoogleStartBitrate?: number;
 	videoGoogleMaxBitrate?: number;
 	videoGoogleMinBitrate?: number;
@@ -79,7 +81,8 @@ export type ProducerObserverEvents =
 	trackended: [];
 };
 
-export class Producer extends EnhancedEventEmitter<ProducerEvents>
+export class Producer<ProducerAppData extends AppData = AppData>
+	extends EnhancedEventEmitter<ProducerEvents>
 {
 	// Id.
 	private readonly _id: string;
@@ -106,7 +109,7 @@ export class Producer extends EnhancedEventEmitter<ProducerEvents>
 	// Whether we should replace the RTCRtpSender.track with null when paused.
 	private _zeroRtpOnPause: boolean;
 	// App custom data.
-	private readonly _appData: Record<string, unknown>;
+	private _appData: ProducerAppData;
 	// Observer instance.
 	protected readonly _observer = new EnhancedEventEmitter<ProducerObserverEvents>();
 
@@ -131,7 +134,7 @@ export class Producer extends EnhancedEventEmitter<ProducerEvents>
 			stopTracks: boolean;
 			disableTrackOnPause: boolean;
 			zeroRtpOnPause: boolean;
-			appData?: Record<string, unknown>;
+			appData?: ProducerAppData;
 		}
 	)
 	{
@@ -150,7 +153,7 @@ export class Producer extends EnhancedEventEmitter<ProducerEvents>
 		this._stopTracks = stopTracks;
 		this._disableTrackOnPause = disableTrackOnPause;
 		this._zeroRtpOnPause = zeroRtpOnPause;
-		this._appData = appData || {};
+		this._appData = appData || {} as ProducerAppData;
 		this.onTrackEnded = this.onTrackEnded.bind(this);
 
 		// NOTE: Minor issue. If zeroRtpOnPause is true, we cannot emit the
@@ -236,18 +239,17 @@ export class Producer extends EnhancedEventEmitter<ProducerEvents>
 	/**
 	 * App custom data.
 	 */
-	get appData(): Record<string, unknown>
+	get appData(): ProducerAppData
 	{
 		return this._appData;
 	}
 
 	/**
-	 * Invalid setter.
+	 * App custom data setter.
 	 */
-	// eslint-disable-next-line @typescript-eslint/no-unused-vars
-	set appData(appData: Record<string, unknown>)
+	set appData(appData: ProducerAppData)
 	{
-		throw new Error('cannot override appData object');
+		this._appData = appData;
 	}
 
 	get observer(): EnhancedEventEmitter
@@ -261,7 +263,9 @@ export class Producer extends EnhancedEventEmitter<ProducerEvents>
 	close(): void
 	{
 		if (this._closed)
+		{
 			return;
+		}
 
 		logger.debug('close()');
 
@@ -281,7 +285,9 @@ export class Producer extends EnhancedEventEmitter<ProducerEvents>
 	transportClosed(): void
 	{
 		if (this._closed)
+		{
 			return;
+		}
 
 		logger.debug('transportClosed()');
 
@@ -301,7 +307,9 @@ export class Producer extends EnhancedEventEmitter<ProducerEvents>
 	async getStats(): Promise<RTCStatsReport>
 	{
 		if (this._closed)
+		{
 			throw new InvalidStateError('closed');
+		}
 
 		return new Promise<RTCStatsReport>((resolve, reject) =>
 		{
@@ -440,9 +448,13 @@ export class Producer extends EnhancedEventEmitter<ProducerEvents>
 		if (this._track && this._disableTrackOnPause)
 		{
 			if (!this._paused)
+			{
 				this._track.enabled = true;
+			}
 			else if (this._paused)
+			{
 				this._track.enabled = false;
+			}
 		}
 
 		// Handle the effective track.
@@ -455,14 +467,22 @@ export class Producer extends EnhancedEventEmitter<ProducerEvents>
 	async setMaxSpatialLayer(spatialLayer: number): Promise<void>
 	{
 		if (this._closed)
+		{
 			throw new InvalidStateError('closed');
+		}
 		else if (this._kind !== 'video')
+		{
 			throw new UnsupportedError('not a video Producer');
+		}
 		else if (typeof spatialLayer !== 'number')
+		{
 			throw new TypeError('invalid spatialLayer');
+		}
 
 		if (spatialLayer === this._maxSpatialLayer)
+		{
 			return;
+		}
 
 		await new Promise<void>((resolve, reject) =>
 		{
@@ -482,9 +502,13 @@ export class Producer extends EnhancedEventEmitter<ProducerEvents>
 	): Promise<void>
 	{
 		if (this._closed)
+		{
 			throw new InvalidStateError('closed');
+		}
 		else if (typeof params !== 'object')
+		{
 			throw new TypeError('invalid params');
+		}
 
 		await new Promise<void>((resolve, reject) =>
 		{
@@ -510,7 +534,9 @@ export class Producer extends EnhancedEventEmitter<ProducerEvents>
 	private handleTrack(): void
 	{
 		if (!this._track)
+		{
 			return;
+		}
 
 		this._track.addEventListener('ended', this.onTrackEnded);
 	}
@@ -518,7 +544,9 @@ export class Producer extends EnhancedEventEmitter<ProducerEvents>
 	private destroyTrack(): void
 	{
 		if (!this._track)
+		{
 			return;
+		}
 
 		try
 		{
@@ -526,7 +554,9 @@ export class Producer extends EnhancedEventEmitter<ProducerEvents>
 
 			// Just stop the track unless the app set stopTracks: false.
 			if (this._stopTracks)
+			{
 				this._track.stop();
+			}
 		}
 		catch (error)
 		{}

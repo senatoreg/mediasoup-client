@@ -21,18 +21,14 @@ import {
 import { RemoteSdp } from './sdp/RemoteSdp';
 import { parse as parseScalabilityMode } from '../scalabilityModes';
 import { IceParameters, DtlsRole } from '../Transport';
-import {
-	RtpCapabilities,
-	RtpParameters,
-	RtpEncodingParameters
-} from '../RtpParameters';
+import { RtpCapabilities, RtpParameters } from '../RtpParameters';
 import { SctpCapabilities, SctpStreamParameters } from '../SctpParameters';
 
-const logger = new Logger('ReactNativeUnifiedPlan');
+const logger = new Logger('Chrome111');
 
 const SCTP_NUM_STREAMS = { OS: 1024, MIS: 1024 };
 
-export class ReactNativeUnifiedPlan extends HandlerInterface
+export class Chrome111 extends HandlerInterface
 {
 	// Handler direction.
 	private _direction?: 'send' | 'recv';
@@ -65,7 +61,7 @@ export class ReactNativeUnifiedPlan extends HandlerInterface
 	 */
 	static createFactory(): HandlerFactory
 	{
-		return (): ReactNativeUnifiedPlan => new ReactNativeUnifiedPlan();
+		return (): Chrome111 => new Chrome111();
 	}
 
 	constructor()
@@ -75,17 +71,12 @@ export class ReactNativeUnifiedPlan extends HandlerInterface
 
 	get name(): string
 	{
-		return 'ReactNativeUnifiedPlan';
+		return 'Chrome111';
 	}
 
 	close(): void
 	{
 		logger.debug('close()');
-
-		// Free/dispose native MediaStream but DO NOT free/dispose native
-		// MediaStreamTracks (that is parent's business).
-		// @ts-ignore (proprietary API in react-native-webrtc).
-		this._sendStream.release(/* releaseTracks */ false);
 
 		// Close RTCPeerConnection.
 		if (this._pc)
@@ -213,11 +204,11 @@ export class ReactNativeUnifiedPlan extends HandlerInterface
 		}
 		else
 		{
+			logger.warn(
+				'run() | pc.connectionState not supported, using pc.iceConnectionState');
+
 			this._pc.addEventListener('iceconnectionstatechange', () =>
 			{
-				logger.warn(
-					'run() | pc.connectionState not supported, using pc.iceConnectionState');
-
 				switch (this._pc.iceConnectionState)
 				{
 					case 'checking':
@@ -317,20 +308,47 @@ export class ReactNativeUnifiedPlan extends HandlerInterface
 
 		if (encodings && encodings.length > 1)
 		{
-			encodings.forEach((encoding: RtpEncodingParameters, idx: number) =>
+			encodings.forEach((encoding, idx: number) =>
 			{
 				encoding.rid = `r${idx}`;
 			});
+
+			// Set rid and verify scalabilityMode in each encoding.
+			// NOTE: Even if WebRTC allows different scalabilityMode (different number
+			// of temporal layers) per simulcast stream, we need that those are the
+			// same in all them, so let's pick up the highest value.
+			// NOTE: If scalabilityMode is not given, Chrome will use L1T3.
+
+			let nextRid = 1;
+			let maxTemporalLayers = 1;
+
+			for (const encoding of encodings)
+			{
+				const temporalLayers = encoding.scalabilityMode
+					? parseScalabilityMode(encoding.scalabilityMode).temporalLayers
+					: 3;
+
+				if (temporalLayers > maxTemporalLayers)
+				{
+					maxTemporalLayers = temporalLayers;
+				}
+			}
+
+			for (const encoding of encodings)
+			{
+				encoding.rid = `r${nextRid++}`;
+				encoding.scalabilityMode = `L1T${maxTemporalLayers}`;
+			}
 		}
 
-		const sendingRtpParameters =
+		const sendingRtpParameters: RtpParameters =
 			utils.clone(this._sendingRtpParametersByKind![track.kind], {});
 
 		// This may throw.
 		sendingRtpParameters.codecs =
 			ortc.reduceCodecs(sendingRtpParameters.codecs, codec);
 
-		const sendingRemoteRtpParameters =
+		const sendingRemoteRtpParameters: RtpParameters =
 			utils.clone(this._sendingRemoteRtpParametersByKind![track.kind], {});
 
 		// This may throw.
@@ -345,9 +363,8 @@ export class ReactNativeUnifiedPlan extends HandlerInterface
 				streams       : [ this._sendStream ],
 				sendEncodings : encodings
 			});
-		let offer = await this._pc.createOffer();
+		const offer = await this._pc.createOffer();
 		let localSdpObject = sdpTransform.parse(offer.sdp);
-		let offerMediaObject;
 
 		if (!this._transportReady)
 		{
@@ -356,34 +373,6 @@ export class ReactNativeUnifiedPlan extends HandlerInterface
 					localDtlsRole : this._forcedLocalDtlsRole ?? 'client',
 					localSdpObject
 				});
-		}
-
-		// Special case for VP9 with SVC.
-		let hackVp9Svc = false;
-
-		const layers =
-			parseScalabilityMode((encodings || [ {} ])[0].scalabilityMode);
-
-		if (
-			encodings &&
-			encodings.length === 1 &&
-			layers.spatialLayers > 1 &&
-			sendingRtpParameters.codecs[0].mimeType.toLowerCase() === 'video/vp9'
-		)
-		{
-			logger.debug('send() | enabling legacy simulcast for VP9 SVC');
-
-			hackVp9Svc = true;
-			localSdpObject = sdpTransform.parse(offer.sdp);
-			offerMediaObject = localSdpObject.media[mediaSectionIdx.idx];
-
-			sdpUnifiedPlanUtils.addLegacySimulcast(
-				{
-					offerMediaObject,
-					numStreams : layers.spatialLayers
-				});
-
-			offer = { type: 'offer', sdp: sdpTransform.write(localSdpObject) };
 		}
 
 		logger.debug(
@@ -399,10 +388,11 @@ export class ReactNativeUnifiedPlan extends HandlerInterface
 		sendingRtpParameters.mid = localId;
 
 		localSdpObject = sdpTransform.parse(this._pc.localDescription.sdp);
-		offerMediaObject = localSdpObject.media[mediaSectionIdx.idx];
+
+		const offerMediaObject = localSdpObject.media[mediaSectionIdx.idx];
 
 		// Set RTCP CNAME.
-		sendingRtpParameters.rtcp.cname =
+		sendingRtpParameters.rtcp!.cname =
 			sdpCommonUtils.getCname({ offerMediaObject });
 
 		// Set RTP encodings by parsing the SDP offer if no encodings are given.
@@ -415,16 +405,10 @@ export class ReactNativeUnifiedPlan extends HandlerInterface
 		// one if just a single encoding has been given.
 		else if (encodings.length === 1)
 		{
-			let newEncodings =
+			const newEncodings =
 				sdpUnifiedPlanUtils.getRtpEncodings({ offerMediaObject });
 
 			Object.assign(newEncodings[0], encodings[0]);
-
-			// Hack for VP9 SVC.
-			if (hackVp9Svc)
-			{
-				newEncodings = [ newEncodings[0] ];
-			}
 
 			sendingRtpParameters.encodings = newEncodings;
 		}
@@ -432,29 +416,6 @@ export class ReactNativeUnifiedPlan extends HandlerInterface
 		else
 		{
 			sendingRtpParameters.encodings = encodings;
-		}
-
-		// If VP8 or H264 and there is effective simulcast, add scalabilityMode to
-		// each encoding.
-		if (
-			sendingRtpParameters.encodings.length > 1 &&
-			(
-				sendingRtpParameters.codecs[0].mimeType.toLowerCase() === 'video/vp8' ||
-				sendingRtpParameters.codecs[0].mimeType.toLowerCase() === 'video/h264'
-			)
-		)
-		{
-			for (const encoding of sendingRtpParameters.encodings)
-			{
-				if (encoding.scalabilityMode)
-				{
-					encoding.scalabilityMode = `L1T${layers.temporalLayers}`;
-				}
-				else
-				{
-					encoding.scalabilityMode = 'L1T3';
-				}
-			}
 		}
 
 		this._remoteSdp!.send(

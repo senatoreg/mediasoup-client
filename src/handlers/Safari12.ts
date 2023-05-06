@@ -4,6 +4,7 @@ import * as utils from '../utils';
 import * as ortc from '../ortc';
 import * as sdpCommonUtils from './sdp/commonUtils';
 import * as sdpUnifiedPlanUtils from './sdp/unifiedPlanUtils';
+import * as ortcUtils from './ortc/utils';
 import {
 	HandlerFactory,
 	HandlerInterface,
@@ -18,6 +19,7 @@ import {
 	HandlerReceiveDataChannelResult
 } from './HandlerInterface';
 import { RemoteSdp } from './sdp/RemoteSdp';
+import { parse as parseScalabilityMode } from '../scalabilityModes';
 import { IceParameters, DtlsRole } from '../Transport';
 import { RtpCapabilities, RtpParameters } from '../RtpParameters';
 import { SctpCapabilities, SctpStreamParameters } from '../SctpParameters';
@@ -111,6 +113,9 @@ export class Safari12 extends HandlerInterface
 			const sdpObject = sdpTransform.parse(offer.sdp);
 			const nativeRtpCapabilities =
 				sdpCommonUtils.extractRtpCapabilities({ sdpObject });
+
+			// libwebrtc supports NACK for OPUS but doesn't announce it.
+			ortcUtils.addNackSuppportForOpus(nativeRtpCapabilities);
 
 			return nativeRtpCapabilities;
 		}
@@ -244,7 +249,9 @@ export class Safari12 extends HandlerInterface
 		this._remoteSdp!.updateIceParameters(iceParameters);
 
 		if (!this._transportReady)
+		{
 			return;
+		}
 
 		if (this._direction === 'send')
 		{
@@ -327,6 +334,9 @@ export class Safari12 extends HandlerInterface
 				});
 		}
 
+		const layers =
+			parseScalabilityMode((encodings || [ {} ])[0].scalabilityMode);
+
 		if (encodings && encodings.length > 1)
 		{
 			logger.debug('send() | enabling legacy simulcast');
@@ -372,7 +382,9 @@ export class Safari12 extends HandlerInterface
 			for (let idx = 0; idx < sendingRtpParameters.encodings.length; ++idx)
 			{
 				if (encodings[idx])
+				{
 					Object.assign(sendingRtpParameters.encodings[idx], encodings[idx]);
+				}
 			}
 		}
 
@@ -388,7 +400,14 @@ export class Safari12 extends HandlerInterface
 		{
 			for (const encoding of sendingRtpParameters.encodings)
 			{
-				encoding.scalabilityMode = 'S1T3';
+				if (encoding.scalabilityMode)
+				{
+					encoding.scalabilityMode = `L1T${layers.temporalLayers}`;
+				}
+				else
+				{
+					encoding.scalabilityMode = 'L1T3';
+				}
 			}
 		}
 
@@ -428,7 +447,9 @@ export class Safari12 extends HandlerInterface
 		const transceiver = this._mapMidTransceiver.get(localId);
 
 		if (!transceiver)
+		{
 			throw new Error('associated RTCRtpTransceiver not found');
+		}
 
 		transceiver.sender.replaceTrack(null);
 
@@ -476,7 +497,9 @@ export class Safari12 extends HandlerInterface
 		const transceiver = this._mapMidTransceiver.get(localId);
 
 		if (!transceiver)
+		{
 			throw new Error('associated RTCRtpTransceiver not found');
+		}
 
 		transceiver.direction = 'inactive';
 		this._remoteSdp!.pauseMediaSection(localId);
@@ -508,7 +531,9 @@ export class Safari12 extends HandlerInterface
 		const transceiver = this._mapMidTransceiver.get(localId);
 
 		if (!transceiver)
+		{
 			throw new Error('associated RTCRtpTransceiver not found');
+		}
 
 		transceiver.direction = 'sendonly';
 		this._remoteSdp!.resumeSendingMediaSection(localId);
@@ -549,7 +574,9 @@ export class Safari12 extends HandlerInterface
 		const transceiver = this._mapMidTransceiver.get(localId);
 
 		if (!transceiver)
+		{
 			throw new Error('associated RTCRtpTransceiver not found');
+		}
 
 		await transceiver.sender.replaceTrack(track);
 	}
@@ -565,19 +592,43 @@ export class Safari12 extends HandlerInterface
 		const transceiver = this._mapMidTransceiver.get(localId);
 
 		if (!transceiver)
+		{
 			throw new Error('associated RTCRtpTransceiver not found');
+		}
 
 		const parameters = transceiver.sender.getParameters();
 
 		parameters.encodings.forEach((encoding: RTCRtpEncodingParameters, idx: number) =>
 		{
 			if (idx <= spatialLayer)
+			{
 				encoding.active = true;
+			}
 			else
+			{
 				encoding.active = false;
+			}
 		});
 
 		await transceiver.sender.setParameters(parameters);
+
+		this._remoteSdp!.muxMediaSectionSimulcast(localId, parameters.encodings);
+
+		const offer = await this._pc.createOffer();
+
+		logger.debug(
+			'setMaxSpatialLayer() | calling pc.setLocalDescription() [offer:%o]',
+			offer);
+
+		await this._pc.setLocalDescription(offer);
+
+		const answer = { type: 'answer', sdp: this._remoteSdp!.getSdp() };
+
+		logger.debug(
+			'setMaxSpatialLayer() | calling pc.setRemoteDescription() [answer:%o]',
+			answer);
+
+		await this._pc.setRemoteDescription(answer);
 	}
 
 	async setRtpEncodingParameters(localId: string, params: any): Promise<void>
@@ -591,7 +642,9 @@ export class Safari12 extends HandlerInterface
 		const transceiver = this._mapMidTransceiver.get(localId);
 
 		if (!transceiver)
+		{
 			throw new Error('associated RTCRtpTransceiver not found');
+		}
 
 		const parameters = transceiver.sender.getParameters();
 
@@ -601,6 +654,24 @@ export class Safari12 extends HandlerInterface
 		});
 
 		await transceiver.sender.setParameters(parameters);
+
+		this._remoteSdp!.muxMediaSectionSimulcast(localId, parameters.encodings);
+
+		const offer = await this._pc.createOffer();
+
+		logger.debug(
+			'setRtpEncodingParameters() | calling pc.setLocalDescription() [offer:%o]',
+			offer);
+
+		await this._pc.setLocalDescription(offer);
+
+		const answer = { type: 'answer', sdp: this._remoteSdp!.getSdp() };
+
+		logger.debug(
+			'setRtpEncodingParameters() | calling pc.setRemoteDescription() [answer:%o]',
+			answer);
+
+		await this._pc.setRemoteDescription(answer);
 	}
 
 	async getSenderStats(localId: string): Promise<RTCStatsReport>
@@ -610,7 +681,9 @@ export class Safari12 extends HandlerInterface
 		const transceiver = this._mapMidTransceiver.get(localId);
 
 		if (!transceiver)
+		{
 			throw new Error('associated RTCRtpTransceiver not found');
+		}
 
 		return transceiver.sender.getStats();
 	}
@@ -774,7 +847,9 @@ export class Safari12 extends HandlerInterface
 				.find((t: RTCRtpTransceiver) => t.mid === localId);
 
 			if (!transceiver)
+			{
 				throw new Error('new RTCRtpTransceiver not found');
+			}
 
 			// Store in the map.
 			this._mapMidTransceiver.set(localId, transceiver);
@@ -800,7 +875,9 @@ export class Safari12 extends HandlerInterface
 			const transceiver = this._mapMidTransceiver.get(localId);
 
 			if (!transceiver)
+			{
 				throw new Error('associated RTCRtpTransceiver not found');
+			}
 
 			this._remoteSdp!.closeMediaSection(transceiver.mid!);
 		}
@@ -838,7 +915,9 @@ export class Safari12 extends HandlerInterface
 			const transceiver = this._mapMidTransceiver.get(localId);
 
 			if (!transceiver)
+			{
 				throw new Error('associated RTCRtpTransceiver not found');
+			}
 
 			transceiver.direction = 'inactive';
 			this._remoteSdp!.pauseMediaSection(localId);
@@ -872,7 +951,9 @@ export class Safari12 extends HandlerInterface
 			const transceiver = this._mapMidTransceiver.get(localId);
 
 			if (!transceiver)
+			{
 				throw new Error('associated RTCRtpTransceiver not found');
+			}
 
 			transceiver.direction = 'recvonly';
 			this._remoteSdp!.resumeReceivingMediaSection(localId);
@@ -902,7 +983,9 @@ export class Safari12 extends HandlerInterface
 		const transceiver = this._mapMidTransceiver.get(localId);
 
 		if (!transceiver)
+		{
 			throw new Error('associated RTCRtpTransceiver not found');
+		}
 
 		return transceiver.receiver.getStats();
 	}
@@ -985,7 +1068,9 @@ export class Safari12 extends HandlerInterface
 	): Promise<void>
 	{
 		if (!localSdpObject)
+		{
 			localSdpObject = sdpTransform.parse(this._pc.localDescription.sdp);
+		}
 
 		// Get our local DTLS parameters.
 		const dtlsParameters =

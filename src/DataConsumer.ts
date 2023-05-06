@@ -1,17 +1,18 @@
 import { Logger } from './Logger';
 import { EnhancedEventEmitter } from './EnhancedEventEmitter';
 import { SctpStreamParameters } from './SctpParameters';
+import { AppData } from './types';
 
 const logger = new Logger('DataConsumer');
 
-export type DataConsumerOptions =
+export type DataConsumerOptions<DataConsumerAppData extends AppData = AppData> =
 {
 	id?: string;
 	dataProducerId?: string;
 	sctpStreamParameters: SctpStreamParameters;
 	label?: string;
 	protocol?: string;
-	appData?: Record<string, unknown>;
+	appData?: DataConsumerAppData;
 };
 
 export type DataConsumerEvents =
@@ -30,7 +31,8 @@ export type DataConsumerObserverEvents =
 	close: [];
 };
 
-export class DataConsumer extends EnhancedEventEmitter<DataConsumerEvents>
+export class DataConsumer<DataConsumerAppData extends AppData = AppData>
+	extends EnhancedEventEmitter<DataConsumerEvents>
 {
 	// Id.
 	private readonly _id: string;
@@ -43,7 +45,7 @@ export class DataConsumer extends EnhancedEventEmitter<DataConsumerEvents>
 	// SCTP stream parameters.
 	private readonly _sctpStreamParameters: SctpStreamParameters;
 	// App custom data.
-	private readonly _appData: Record<string, unknown>;
+	private _appData: DataConsumerAppData;
 	// Observer instance.
 	protected readonly _observer = new EnhancedEventEmitter<DataConsumerObserverEvents>();
 
@@ -60,7 +62,7 @@ export class DataConsumer extends EnhancedEventEmitter<DataConsumerEvents>
 			dataProducerId: string;
 			dataChannel: RTCDataChannel;
 			sctpStreamParameters: SctpStreamParameters;
-			appData?: Record<string, unknown>;
+			appData?: DataConsumerAppData;
 		}
 	)
 	{
@@ -72,7 +74,7 @@ export class DataConsumer extends EnhancedEventEmitter<DataConsumerEvents>
 		this._dataProducerId = dataProducerId;
 		this._dataChannel = dataChannel;
 		this._sctpStreamParameters = sctpStreamParameters;
-		this._appData = appData || {};
+		this._appData = appData || {} as DataConsumerAppData;
 
 		this.handleDataChannel();
 	}
@@ -152,18 +154,17 @@ export class DataConsumer extends EnhancedEventEmitter<DataConsumerEvents>
 	/**
 	 * App custom data.
 	 */
-	get appData(): Record<string, unknown>
+	get appData(): DataConsumerAppData
 	{
 		return this._appData;
 	}
 
 	/**
-	 * Invalid setter.
+	 * App custom data setter.
 	 */
-	// eslint-disable-next-line @typescript-eslint/no-unused-vars
-	set appData(appData: Record<string, unknown>)
+	set appData(appData: DataConsumerAppData)
 	{
-		throw new Error('cannot override appData object');
+		this._appData = appData;
 	}
 
 	get observer(): EnhancedEventEmitter
@@ -177,7 +178,9 @@ export class DataConsumer extends EnhancedEventEmitter<DataConsumerEvents>
 	close(): void
 	{
 		if (this._closed)
+		{
 			return;
+		}
 
 		logger.debug('close()');
 
@@ -197,7 +200,9 @@ export class DataConsumer extends EnhancedEventEmitter<DataConsumerEvents>
 	transportClosed(): void
 	{
 		if (this._closed)
+		{
 			return;
+		}
 
 		logger.debug('transportClosed()');
 
@@ -216,7 +221,9 @@ export class DataConsumer extends EnhancedEventEmitter<DataConsumerEvents>
 		this._dataChannel.addEventListener('open', () =>
 		{
 			if (this._closed)
+			{
 				return;
+			}
 
 			logger.debug('DataChannel "open" event');
 
@@ -226,12 +233,16 @@ export class DataConsumer extends EnhancedEventEmitter<DataConsumerEvents>
 		this._dataChannel.addEventListener('error', (event: any) =>
 		{
 			if (this._closed)
+			{
 				return;
+			}
 
 			let { error } = event;
 
 			if (!error)
+			{
 				error = new Error('unknown DataChannel error');
+			}
 
 			if (error.errorDetail === 'sctp-failure')
 			{
@@ -250,7 +261,9 @@ export class DataConsumer extends EnhancedEventEmitter<DataConsumerEvents>
 		this._dataChannel.addEventListener('close', () =>
 		{
 			if (this._closed)
+			{
 				return;
+			}
 
 			logger.warn('DataChannel "close" event');
 
@@ -266,7 +279,9 @@ export class DataConsumer extends EnhancedEventEmitter<DataConsumerEvents>
 		this._dataChannel.addEventListener('message', (event: any) =>
 		{
 			if (this._closed)
+			{
 				return;
+			}
 
 			this.safeEmit('message', event.data);
 		});

@@ -6,6 +6,7 @@ import * as utils from './utils';
 import * as ortc from './ortc';
 import { Transport, TransportOptions, CanProduceByKind } from './Transport';
 import { HandlerFactory, HandlerInterface } from './handlers/HandlerInterface';
+import { Chrome111 } from './handlers/Chrome111';
 import { Chrome74 } from './handlers/Chrome74';
 import { Chrome70 } from './handlers/Chrome70';
 import { Chrome67 } from './handlers/Chrome67';
@@ -18,10 +19,12 @@ import { ReactNativeUnifiedPlan } from './handlers/ReactNativeUnifiedPlan';
 import { ReactNative } from './handlers/ReactNative';
 import { RtpCapabilities, MediaKind } from './RtpParameters';
 import { SctpCapabilities } from './SctpParameters';
+import { AppData } from './types';
 
 const logger = new Logger('Device');
 
 export type BuiltinHandlerName =
+	| 'Chrome111'
 	| 'Chrome74'
 	| 'Chrome70'
 	| 'Chrome67'
@@ -49,11 +52,6 @@ export type DeviceOptions =
 	 */
 	Handler?: string;
 };
-
-interface InternalTransportOptions extends TransportOptions
-{
-	direction: 'send' | 'recv';
-}
 
 export function detectDevice(): BuiltinHandlerName | undefined
 {
@@ -91,7 +89,11 @@ export function detectDevice(): BuiltinHandlerName | undefined
 		const engine = browser.getEngine();
 
 		// Chrome, Chromium, and Edge.
-		if (browser.satisfies({ chrome: '>=74', chromium: '>=74', 'microsoft edge': '>=88' }))
+		if (browser.satisfies({ chrome: '>=111', chromium: '>=111', 'microsoft edge': '>=111' }))
+		{
+			return 'Chrome111';
+		}
+		else if (browser.satisfies({ chrome: '>=74', chromium: '>=74', 'microsoft edge': '>=88' }))
 		{
 			return 'Chrome74';
 		}
@@ -148,7 +150,11 @@ export function detectDevice(): BuiltinHandlerName | undefined
 			{
 				const version = Number(match[1]);
 
-				if (version >= 74)
+				if (version >= 111)
+				{
+					return 'Chrome111';
+				}
+				else if (version >= 74)
 				{
 					return 'Chrome74';
 				}
@@ -167,7 +173,7 @@ export function detectDevice(): BuiltinHandlerName | undefined
 			}
 			else
 			{
-				return 'Chrome74';
+				return 'Chrome111';
 			}
 		}
 		// Unsupported browser.
@@ -271,6 +277,9 @@ export class Device
 
 			switch (handlerName)
 			{
+				case 'Chrome111':
+					this._handlerFactory = Chrome111.createFactory();
+					break;
 				case 'Chrome74':
 					this._handlerFactory = Chrome74.createFactory();
 					break;
@@ -347,7 +356,9 @@ export class Device
 	get rtpCapabilities(): RtpCapabilities
 	{
 		if (!this._loaded)
+		{
 			throw new InvalidStateError('not loaded');
+		}
 
 		return this._recvRtpCapabilities!;
 	}
@@ -360,7 +371,9 @@ export class Device
 	get sctpCapabilities(): SctpCapabilities
 	{
 		if (!this._loaded)
+		{
 			throw new InvalidStateError('not loaded');
+		}
 
 		return this._sctpCapabilities!;
 	}
@@ -448,7 +461,9 @@ export class Device
 		catch (error)
 		{
 			if (handler)
+			{
 				handler.close();
+			}
 
 			throw error;
 		}
@@ -463,9 +478,13 @@ export class Device
 	canProduce(kind: MediaKind): boolean
 	{
 		if (!this._loaded)
+		{
 			throw new InvalidStateError('not loaded');
+		}
 		else if (kind !== 'audio' && kind !== 'video')
+		{
 			throw new TypeError(`invalid kind "${kind}"`);
+		}
 
 		return this._canProduceByKind[kind];
 	}
@@ -476,7 +495,7 @@ export class Device
 	 * @throws {InvalidStateError} if not loaded.
 	 * @throws {TypeError} if wrong arguments.
 	 */
-	createSendTransport(
+	createSendTransport<TransportAppData extends AppData = AppData>(
 		{
 			id,
 			iceParameters,
@@ -488,12 +507,12 @@ export class Device
 			additionalSettings,
 			proprietaryConstraints,
 			appData
-		}: TransportOptions
-	): Transport
+		}: TransportOptions<TransportAppData>
+	): Transport<TransportAppData>
 	{
 		logger.debug('createSendTransport()');
 
-		return this.createTransport(
+		return this.createTransport<TransportAppData>(
 			{
 				direction              : 'send',
 				id                     : id,
@@ -515,7 +534,7 @@ export class Device
 	 * @throws {InvalidStateError} if not loaded.
 	 * @throws {TypeError} if wrong arguments.
 	 */
-	createRecvTransport(
+	createRecvTransport<TransportAppData extends AppData = AppData>(
 		{
 			id,
 			iceParameters,
@@ -527,12 +546,12 @@ export class Device
 			additionalSettings,
 			proprietaryConstraints,
 			appData
-		}: TransportOptions
-	): Transport
+		}: TransportOptions<TransportAppData>
+	): Transport<TransportAppData>
 	{
 		logger.debug('createRecvTransport()');
 
-		return this.createTransport(
+		return this.createTransport<TransportAppData>(
 			{
 				direction              : 'recv',
 				id                     : id,
@@ -548,7 +567,7 @@ export class Device
 			});
 	}
 
-	private createTransport(
+	private createTransport<TransportAppData extends AppData>(
 		{
 			direction,
 			id,
@@ -561,26 +580,43 @@ export class Device
 			additionalSettings,
 			proprietaryConstraints,
 			appData
-		}: InternalTransportOptions
-	): Transport
+		}:
+		{
+			direction: 'send' | 'recv';
+		} & TransportOptions<TransportAppData>
+	): Transport<TransportAppData>
 	{
 		if (!this._loaded)
+		{
 			throw new InvalidStateError('not loaded');
+		}
 		else if (typeof id !== 'string')
+		{
 			throw new TypeError('missing id');
+		}
 		else if (typeof iceParameters !== 'object')
+		{
 			throw new TypeError('missing iceParameters');
+		}
 		else if (!Array.isArray(iceCandidates))
+		{
 			throw new TypeError('missing iceCandidates');
+		}
 		else if (typeof dtlsParameters !== 'object')
+		{
 			throw new TypeError('missing dtlsParameters');
+		}
 		else if (sctpParameters && typeof sctpParameters !== 'object')
+		{
 			throw new TypeError('wrong sctpParameters');
+		}
 		else if (appData && typeof appData !== 'object')
+		{
 			throw new TypeError('if given, appData must be an object');
+		}
 
 		// Create a new Transport.
-		const transport = new Transport(
+		const transport = new Transport<TransportAppData>(
 			{
 				direction,
 				id,
