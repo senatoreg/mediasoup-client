@@ -112,6 +112,11 @@ export type DtlsFingerprint =
 
 export type DtlsRole = 'auto' | 'client' | 'server';
 
+export type IceGatheringState =
+	| 'new'
+	| 'gathering'
+	| 'complete';
+
 export type ConnectionState =
 	| 'new'
 	| 'connecting'
@@ -130,6 +135,7 @@ export type PlainRtpParameters =
 export type TransportEvents =
 {
 	connect: [{ dtlsParameters: DtlsParameters }, () => void, (error: Error) => void];
+	icegatheringstatechange: [IceGatheringState];
 	connectionstatechange: [ConnectionState];
 	produce:
 	[
@@ -199,6 +205,8 @@ export class Transport<TransportAppData extends AppData = AppData>
 	private readonly _maxSctpMessageSize?: number | null;
 	// RTC handler isntance.
 	private readonly _handler: HandlerInterface;
+	// Transport ICE gathering state.
+	private _iceGatheringState: IceGatheringState = 'new';
 	// Transport connection state.
 	private _connectionState: ConnectionState = 'new';
 	// App custom data.
@@ -333,6 +341,14 @@ export class Transport<TransportAppData extends AppData = AppData>
 	}
 
 	/**
+	 * ICE gathering state.
+	 */
+	get iceGatheringState(): IceGatheringState
+	{
+		return this._iceGatheringState;
+	}
+
+	/**
 	 * Connection state.
 	 */
 	get connectionState(): ConnectionState
@@ -380,6 +396,10 @@ export class Transport<TransportAppData extends AppData = AppData>
 
 		// Close the handler.
 		this._handler.close();
+
+		// Change connection state to 'closed' since the handler may not emit
+		// '@connectionstatechange' event.
+		this._connectionState = 'closed';
 
 		// Close all Producers.
 		for (const producer of this._producers.values())
@@ -449,7 +469,7 @@ export class Transport<TransportAppData extends AppData = AppData>
 
 		// Enqueue command.
 		return this._awaitQueue.push(
-			async () => this._handler.restartIce(iceParameters),
+			async () => await this._handler.restartIce(iceParameters),
 			'transport.restartIce()');
 	}
 
@@ -1217,6 +1237,23 @@ export class Transport<TransportAppData extends AppData = AppData>
 			this.safeEmit('connect', { dtlsParameters }, callback, errback);
 		});
 
+		handler.on('@icegatheringstatechange', (iceGatheringState: IceGatheringState) =>
+		{
+			if (iceGatheringState === this._iceGatheringState)
+			{
+				return;
+			}
+
+			logger.debug('ICE gathering state changed to %s', iceGatheringState);
+
+			this._iceGatheringState = iceGatheringState;
+
+			if (!this._closed)
+			{
+				this.safeEmit('icegatheringstatechange', iceGatheringState);
+			}
+		});
+
 		handler.on('@connectionstatechange', (connectionState: ConnectionState) =>
 		{
 			if (connectionState === this._connectionState)
@@ -1247,7 +1284,7 @@ export class Transport<TransportAppData extends AppData = AppData>
 			}
 
 			this._awaitQueue.push(
-				async () => this._handler.stopSending(producer.localId),
+				async () => await this._handler.stopSending(producer.localId),
 				'producer @close event')
 				.catch((error: Error) => logger.warn('producer.close() failed:%o', error));
 		});
@@ -1255,7 +1292,7 @@ export class Transport<TransportAppData extends AppData = AppData>
 		producer.on('@pause', (callback, errback) =>
 		{
 			this._awaitQueue.push(
-				async () => this._handler.pauseSending(producer.localId),
+				async () => await this._handler.pauseSending(producer.localId),
 				'producer @pause event')
 				.then(callback)
 				.catch(errback);
@@ -1264,7 +1301,7 @@ export class Transport<TransportAppData extends AppData = AppData>
 		producer.on('@resume', (callback, errback) =>
 		{
 			this._awaitQueue.push(
-				async () => this._handler.resumeSending(producer.localId),
+				async () => await this._handler.resumeSending(producer.localId),
 				'producer @resume event')
 				.then(callback)
 				.catch(errback);
@@ -1273,7 +1310,7 @@ export class Transport<TransportAppData extends AppData = AppData>
 		producer.on('@replacetrack', (track, callback, errback) =>
 		{
 			this._awaitQueue.push(
-				async () => this._handler.replaceTrack(producer.localId, track),
+				async () => await this._handler.replaceTrack(producer.localId, track),
 				'producer @replacetrack event')
 				.then(callback)
 				.catch(errback);
@@ -1283,7 +1320,7 @@ export class Transport<TransportAppData extends AppData = AppData>
 		{
 			this._awaitQueue.push(
 				async () => (
-					this._handler.setMaxSpatialLayer(producer.localId, spatialLayer)
+					await this._handler.setMaxSpatialLayer(producer.localId, spatialLayer)
 				), 'producer @setmaxspatiallayer event')
 				.then(callback)
 				.catch(errback);
@@ -1293,7 +1330,7 @@ export class Transport<TransportAppData extends AppData = AppData>
 		{
 			this._awaitQueue.push(
 				async () => (
-					this._handler.setRtpEncodingParameters(producer.localId, params)
+					await this._handler.setRtpEncodingParameters(producer.localId, params)
 				), 'producer @setrtpencodingparameters event')
 				.then(callback)
 				.catch(errback);

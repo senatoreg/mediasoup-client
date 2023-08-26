@@ -5,6 +5,7 @@ import * as ortc from '../ortc';
 import * as sdpCommonUtils from './sdp/commonUtils';
 import * as sdpUnifiedPlanUtils from './sdp/unifiedPlanUtils';
 import * as ortcUtils from './ortc/utils';
+import { InvalidStateError } from '../errors';
 import {
 	HandlerFactory,
 	HandlerInterface,
@@ -30,6 +31,8 @@ const SCTP_NUM_STREAMS = { OS: 1024, MIS: 1024 };
 
 export class Safari12 extends HandlerInterface
 {
+	// Closed flag.
+	private _closed = false;
 	// Handler direction.
 	private _direction?: 'send' | 'recv';
 	// Remote SDP handler.
@@ -77,6 +80,13 @@ export class Safari12 extends HandlerInterface
 	close(): void
 	{
 		logger.debug('close()');
+
+		if (this._closed)
+		{
+			return;
+		}
+
+		this._closed = true;
 
 		// Close RTCPeerConnection.
 		if (this._pc)
@@ -152,6 +162,8 @@ export class Safari12 extends HandlerInterface
 		}: HandlerRunOptions
 	): void
 	{
+		this.assertNotClosed();
+
 		logger.debug('run()');
 
 		this._direction = direction;
@@ -193,6 +205,11 @@ export class Safari12 extends HandlerInterface
 			},
 			proprietaryConstraints);
 
+		this._pc.addEventListener('icegatheringstatechange', () =>
+		{
+			this.emit('@icegatheringstatechange', this._pc.iceGatheringState);
+		});
+
 		if (this._pc.connectionState)
 		{
 			this._pc.addEventListener('connectionstatechange', () =>
@@ -232,6 +249,8 @@ export class Safari12 extends HandlerInterface
 
 	async updateIceServers(iceServers: RTCIceServer[]): Promise<void>
 	{
+		this.assertNotClosed();
+
 		logger.debug('updateIceServers()');
 
 		const configuration = this._pc.getConfiguration();
@@ -243,6 +262,8 @@ export class Safari12 extends HandlerInterface
 
 	async restartIce(iceParameters: IceParameters): Promise<void>
 	{
+		this.assertNotClosed();
+
 		logger.debug('restartIce()');
 
 		// Provide the remote SDP handler with new remote ICE parameters.
@@ -293,6 +314,8 @@ export class Safari12 extends HandlerInterface
 
 	async getTransportStats(): Promise<RTCStatsReport>
 	{
+		this.assertNotClosed();
+
 		return this._pc.getStats();
 	}
 
@@ -300,6 +323,7 @@ export class Safari12 extends HandlerInterface
 		{ track, encodings, codecOptions, codec }: HandlerSendOptions
 	): Promise<HandlerSendResult>
 	{
+		this.assertNotClosed();
 		this.assertSendDirection();
 
 		logger.debug('send() [kind:%s, track.id:%s]', track.kind, track.id);
@@ -442,6 +466,11 @@ export class Safari12 extends HandlerInterface
 	{
 		this.assertSendDirection();
 
+		if (this._closed)
+		{
+			return;
+		}
+
 		logger.debug('stopSending() [localId:%s]', localId);
 
 		const transceiver = this._mapMidTransceiver.get(localId);
@@ -490,6 +519,7 @@ export class Safari12 extends HandlerInterface
 	// eslint-disable-next-line @typescript-eslint/no-unused-vars
 	async pauseSending(localId: string): Promise<void>
 	{
+		this.assertNotClosed();
 		this.assertSendDirection();
 
 		logger.debug('pauseSending() [localId:%s]', localId);
@@ -524,6 +554,7 @@ export class Safari12 extends HandlerInterface
 	// eslint-disable-next-line @typescript-eslint/no-unused-vars
 	async resumeSending(localId: string): Promise<void>
 	{
+		this.assertNotClosed();
 		this.assertSendDirection();
 
 		logger.debug('resumeSending() [localId:%s]', localId);
@@ -559,6 +590,7 @@ export class Safari12 extends HandlerInterface
 		localId: string, track: MediaStreamTrack | null
 	): Promise<void>
 	{
+		this.assertNotClosed();
 		this.assertSendDirection();
 
 		if (track)
@@ -583,6 +615,7 @@ export class Safari12 extends HandlerInterface
 
 	async setMaxSpatialLayer(localId: string, spatialLayer: number): Promise<void>
 	{
+		this.assertNotClosed();
 		this.assertSendDirection();
 
 		logger.debug(
@@ -633,6 +666,7 @@ export class Safari12 extends HandlerInterface
 
 	async setRtpEncodingParameters(localId: string, params: any): Promise<void>
 	{
+		this.assertNotClosed();
 		this.assertSendDirection();
 
 		logger.debug(
@@ -676,6 +710,7 @@ export class Safari12 extends HandlerInterface
 
 	async getSenderStats(localId: string): Promise<RTCStatsReport>
 	{
+		this.assertNotClosed();
 		this.assertSendDirection();
 
 		const transceiver = this._mapMidTransceiver.get(localId);
@@ -698,6 +733,7 @@ export class Safari12 extends HandlerInterface
 		}: HandlerSendDataChannelOptions
 	): Promise<HandlerSendDataChannelResult>
 	{
+		this.assertNotClosed();
 		this.assertSendDirection();
 
 		const options =
@@ -770,6 +806,7 @@ export class Safari12 extends HandlerInterface
 		optionsList: HandlerReceiveOptions[]
 	) : Promise<HandlerReceiveResult[]>
 	{
+		this.assertNotClosed();
 		this.assertRecvDirection();
 
 		const results: HandlerReceiveResult[] = [];
@@ -868,6 +905,11 @@ export class Safari12 extends HandlerInterface
 	{
 		this.assertRecvDirection();
 
+		if (this._closed)
+		{
+			return;
+		}
+
 		for (const localId of localIds)
 		{
 			logger.debug('stopReceiving() [localId:%s]', localId);
@@ -906,6 +948,7 @@ export class Safari12 extends HandlerInterface
 
 	async pauseReceiving(localIds: string[]): Promise<void>
 	{
+		this.assertNotClosed();
 		this.assertRecvDirection();
 
 		for (const localId of localIds)
@@ -942,6 +985,7 @@ export class Safari12 extends HandlerInterface
 
 	async resumeReceiving(localIds: string[]): Promise<void>
 	{
+		this.assertNotClosed();
 		this.assertRecvDirection();
 
 		for (const localId of localIds)
@@ -978,6 +1022,7 @@ export class Safari12 extends HandlerInterface
 
 	async getReceiverStats(localId: string): Promise<RTCStatsReport>
 	{
+		this.assertNotClosed();
 		this.assertRecvDirection();
 
 		const transceiver = this._mapMidTransceiver.get(localId);
@@ -994,6 +1039,7 @@ export class Safari12 extends HandlerInterface
 		{ sctpStreamParameters, label, protocol }: HandlerReceiveDataChannelOptions
 	): Promise<HandlerReceiveDataChannelResult>
 	{
+		this.assertNotClosed();
 		this.assertRecvDirection();
 
 		const {
@@ -1095,6 +1141,14 @@ export class Safari12 extends HandlerInterface
 		});
 
 		this._transportReady = true;
+	}
+
+	private assertNotClosed(): void
+	{
+		if (this._closed)
+		{
+			throw new InvalidStateError('method called in a closed handler');
+		}
 	}
 
 	private assertSendDirection(): void

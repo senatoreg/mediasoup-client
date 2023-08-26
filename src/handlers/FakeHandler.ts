@@ -3,6 +3,7 @@ import { Logger } from '../Logger';
 import { FakeMediaStreamTrack } from 'fake-mediastreamtrack';
 import * as utils from '../utils';
 import * as ortc from '../ortc';
+import { InvalidStateError } from '../errors';
 import {
 	HandlerInterface,
 	HandlerRunOptions,
@@ -19,6 +20,7 @@ import {
 	IceParameters,
 	DtlsParameters,
 	DtlsRole,
+	IceGatheringState,
 	ConnectionState
 } from '../Transport';
 import { RtpCapabilities, RtpParameters } from '../RtpParameters';
@@ -88,6 +90,8 @@ export type FakeParameters =
 
 export class FakeHandler extends HandlerInterface
 {
+	// Closed flag.
+	private _closed = false;
 	// Fake parameters source of RTP and SCTP parameters and capabilities.
 	private fakeParameters: any;
 	// Generic sending RTP parameters for audio and video.
@@ -126,6 +130,19 @@ export class FakeHandler extends HandlerInterface
 	close(): void
 	{
 		logger.debug('close()');
+
+		if (this._closed)
+		{
+			return;
+		}
+
+		this._closed = true;
+	}
+
+	// NOTE: Custom method for simulation purposes.
+	setIceGatheringState(iceGatheringState: IceGatheringState): void
+	{
+		this.emit('@icegatheringstatechange', iceGatheringState);
 	}
 
 	// NOTE: Custom method for simulation purposes.
@@ -164,6 +181,8 @@ export class FakeHandler extends HandlerInterface
 		}: HandlerRunOptions
 	): void
 	{
+		this.assertNotClosed();
+
 		logger.debug('run()');
 
 		// Generic sending RTP parameters for audio and video.
@@ -178,21 +197,23 @@ export class FakeHandler extends HandlerInterface
 	// eslint-disable-next-line @typescript-eslint/no-unused-vars
 	async updateIceServers(iceServers: RTCIceServer[]): Promise<void>
 	{
-		logger.debug('updateIceServers()');
+		this.assertNotClosed();
 
-		return;
+		logger.debug('updateIceServers()');
 	}
 
 	// eslint-disable-next-line @typescript-eslint/no-unused-vars
 	async restartIce(iceParameters: IceParameters): Promise<void>
 	{
-		logger.debug('restartIce()');
+		this.assertNotClosed();
 
-		return;
+		logger.debug('restartIce()');
 	}
 
 	async getTransportStats(): Promise<RTCStatsReport>
 	{
+		this.assertNotClosed();
+
 		return new Map(); // NOTE: Whatever.
 	}
 
@@ -201,6 +222,8 @@ export class FakeHandler extends HandlerInterface
 		{ track, encodings, codecOptions, codec }: HandlerSendOptions
 	): Promise<HandlerSendResult>
 	{
+		this.assertNotClosed();
+
 		logger.debug('send() [kind:%s, track.id:%s]', track.kind, track.id);
 
 		if (!this._transportReady)
@@ -251,6 +274,11 @@ export class FakeHandler extends HandlerInterface
 	{
 		logger.debug('stopSending() [localId:%s]', localId);
 
+		if (this._closed)
+		{
+			return;
+		}
+
 		if (!this._tracks.has(Number(localId)))
 		{
 			throw new Error('local track not found');
@@ -262,12 +290,16 @@ export class FakeHandler extends HandlerInterface
 	// eslint-disable-next-line @typescript-eslint/no-unused-vars
 	async pauseSending(localId: string): Promise<void>
 	{
+		this.assertNotClosed();
+
 		// Unimplemented.
 	}
 
 	// eslint-disable-next-line @typescript-eslint/no-unused-vars
 	async resumeSending(localId: string): Promise<void>
 	{
+		this.assertNotClosed();
+
 		// Unimplemented.
 	}
 
@@ -275,6 +307,8 @@ export class FakeHandler extends HandlerInterface
 		localId: string, track: MediaStreamTrack | null
 	): Promise<void>
 	{
+		this.assertNotClosed();
+
 		if (track)
 		{
 			logger.debug(
@@ -291,6 +325,8 @@ export class FakeHandler extends HandlerInterface
 
 	async setMaxSpatialLayer(localId: string, spatialLayer: number): Promise<void>
 	{
+		this.assertNotClosed();
+
 		logger.debug(
 			'setMaxSpatialLayer() [localId:%s, spatialLayer:%s]',
 			localId, spatialLayer);
@@ -298,6 +334,8 @@ export class FakeHandler extends HandlerInterface
 
 	async setRtpEncodingParameters(localId: string, params: any): Promise<void>
 	{
+		this.assertNotClosed();
+
 		logger.debug(
 			'setRtpEncodingParameters() [localId:%s, params:%o]',
 			localId, params);
@@ -306,6 +344,8 @@ export class FakeHandler extends HandlerInterface
 	// eslint-disable-next-line @typescript-eslint/no-unused-vars
 	async getSenderStats(localId: string): Promise<RTCStatsReport>
 	{
+		this.assertNotClosed();
+
 		return new Map(); // NOTE: Whatever.
 	}
 
@@ -319,6 +359,8 @@ export class FakeHandler extends HandlerInterface
 		}: HandlerSendDataChannelOptions
 	): Promise<HandlerSendDataChannelResult>
 	{
+		this.assertNotClosed();
+
 		if (!this._transportReady)
 		{
 			await this.setupTransport({ localDtlsRole: 'server' });
@@ -352,6 +394,8 @@ export class FakeHandler extends HandlerInterface
 		optionsList: HandlerReceiveOptions[]
 	) : Promise<HandlerReceiveResult[]>
 	{
+		this.assertNotClosed();
+
 		const results: HandlerReceiveResult[] = [];
 
 		for (const options of optionsList)
@@ -378,6 +422,11 @@ export class FakeHandler extends HandlerInterface
 
 	async stopReceiving(localIds: string[]): Promise<void>
 	{
+		if (this._closed)
+		{
+			return;
+		}
+
 		for (const localId of localIds)
 		{
 			logger.debug('stopReceiving() [localId:%s]', localId);
@@ -390,6 +439,8 @@ export class FakeHandler extends HandlerInterface
 		// eslint-disable-next-line @typescript-eslint/no-unused-vars
 		localIds: string[]): Promise<void>
 	{
+		this.assertNotClosed();
+
 		// Unimplemented.
 	}
 
@@ -397,12 +448,16 @@ export class FakeHandler extends HandlerInterface
 		// eslint-disable-next-line @typescript-eslint/no-unused-vars
 		localIds: string[]): Promise<void>
 	{
+		this.assertNotClosed();
+
 		// Unimplemented.
 	}
 
 	// eslint-disable-next-line @typescript-eslint/no-unused-vars
 	async getReceiverStats(localId: string): Promise<RTCStatsReport>
 	{
+		this.assertNotClosed();
+
 		return new Map(); //
 	}
 
@@ -410,6 +465,8 @@ export class FakeHandler extends HandlerInterface
 		{ sctpStreamParameters, label, protocol }: HandlerReceiveDataChannelOptions
 	): Promise<HandlerReceiveDataChannelResult>
 	{
+		this.assertNotClosed();
+
 		if (!this._transportReady)
 		{
 			await this.setupTransport({ localDtlsRole: 'client' });
@@ -461,5 +518,13 @@ export class FakeHandler extends HandlerInterface
 		));
 
 		this._transportReady = true;
+	}
+
+	private assertNotClosed(): void
+	{
+		if (this._closed)
+		{
+			throw new InvalidStateError('method called in a closed handler');
+		}
 	}
 }
