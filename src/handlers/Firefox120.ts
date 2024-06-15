@@ -1,11 +1,10 @@
 import * as sdpTransform from 'sdp-transform';
 import { Logger } from '../Logger';
+import { UnsupportedError, InvalidStateError } from '../errors';
 import * as utils from '../utils';
 import * as ortc from '../ortc';
 import * as sdpCommonUtils from './sdp/commonUtils';
 import * as sdpUnifiedPlanUtils from './sdp/unifiedPlanUtils';
-import * as ortcUtils from './ortc/utils';
-import { InvalidStateError } from '../errors';
 import {
 	HandlerFactory,
 	HandlerInterface,
@@ -29,11 +28,11 @@ import {
 } from '../RtpParameters';
 import { SctpCapabilities, SctpStreamParameters } from '../SctpParameters';
 
-const logger = new Logger('ReactNativeUnifiedPlan');
+const logger = new Logger('Firefox120');
 
-const SCTP_NUM_STREAMS = { OS: 1024, MIS: 1024 };
+const SCTP_NUM_STREAMS = { OS: 16, MIS: 2048 };
 
-export class ReactNativeUnifiedPlan extends HandlerInterface {
+export class Firefox120 extends HandlerInterface {
 	// Closed flag.
 	private _closed = false;
 	// Handler direction.
@@ -45,9 +44,6 @@ export class ReactNativeUnifiedPlan extends HandlerInterface {
 	// Generic sending RTP parameters for audio and video suitable for the SDP
 	// remote answer.
 	private _sendingRemoteRtpParametersByKind?: { [key: string]: RtpParameters };
-	// Initial server side DTLS role. If not 'auto', it will force the opposite
-	// value in client side.
-	private _forcedLocalDtlsRole?: DtlsRole;
 	// RTCPeerConnection instance.
 	private _pc: any;
 	// Map of RTCTransceivers indexed by MID.
@@ -66,7 +62,7 @@ export class ReactNativeUnifiedPlan extends HandlerInterface {
 	 * Creates a factory function.
 	 */
 	static createFactory(): HandlerFactory {
-		return (): ReactNativeUnifiedPlan => new ReactNativeUnifiedPlan();
+		return (): Firefox120 => new Firefox120();
 	}
 
 	constructor() {
@@ -74,7 +70,7 @@ export class ReactNativeUnifiedPlan extends HandlerInterface {
 	}
 
 	get name(): string {
-		return 'ReactNativeUnifiedPlan';
+		return 'Firefox120';
 	}
 
 	close(): void {
@@ -85,11 +81,6 @@ export class ReactNativeUnifiedPlan extends HandlerInterface {
 		}
 
 		this._closed = true;
-
-		// Free/dispose native MediaStream but DO NOT free/dispose native
-		// MediaStreamTracks (that is parent's business).
-		// @ts-ignore (proprietary API in react-native-webrtc).
-		this._sendStream.release(/* releaseTracks */ false);
 
 		// Close RTCPeerConnection.
 		if (this._pc) {
@@ -109,14 +100,38 @@ export class ReactNativeUnifiedPlan extends HandlerInterface {
 			iceTransportPolicy: 'all',
 			bundlePolicy: 'max-bundle',
 			rtcpMuxPolicy: 'require',
-			sdpSemantics: 'unified-plan',
 		});
 
+		// NOTE: We need to add a real video track to get the RID extension mapping,
+		// otherwiser Firefox doesn't include it in the SDP.
+		const canvas = document.createElement('canvas');
+
+		// NOTE: Otherwise Firefox fails in next line.
+		canvas.getContext('2d');
+
+		const fakeStream = (canvas as any).captureStream();
+		const fakeVideoTrack = fakeStream.getVideoTracks()[0];
+
 		try {
-			pc.addTransceiver('audio');
-			pc.addTransceiver('video');
+			pc.addTransceiver('audio', { direction: 'sendrecv' });
+
+			pc.addTransceiver(fakeVideoTrack, {
+				direction: 'sendrecv',
+				sendEncodings: [
+					{ rid: 'r0', maxBitrate: 100000 },
+					{ rid: 'r1', maxBitrate: 500000 },
+				],
+			});
 
 			const offer = await pc.createOffer();
+
+			try {
+				canvas.remove();
+			} catch (error) {}
+
+			try {
+				fakeVideoTrack.stop();
+			} catch (error) {}
 
 			try {
 				pc.close();
@@ -127,11 +142,16 @@ export class ReactNativeUnifiedPlan extends HandlerInterface {
 				sdpObject,
 			});
 
-			// libwebrtc supports NACK for OPUS but doesn't announce it.
-			ortcUtils.addNackSuppportForOpus(nativeRtpCapabilities);
-
 			return nativeRtpCapabilities;
 		} catch (error) {
+			try {
+				canvas.remove();
+			} catch (error2) {}
+
+			try {
+				fakeVideoTrack.stop();
+			} catch (error2) {}
+
 			try {
 				pc.close();
 			} catch (error2) {}
@@ -189,18 +209,12 @@ export class ReactNativeUnifiedPlan extends HandlerInterface {
 			),
 		};
 
-		if (dtlsParameters.role && dtlsParameters.role !== 'auto') {
-			this._forcedLocalDtlsRole =
-				dtlsParameters.role === 'server' ? 'client' : 'server';
-		}
-
 		this._pc = new (RTCPeerConnection as any)(
 			{
 				iceServers: iceServers || [],
 				iceTransportPolicy: iceTransportPolicy || 'all',
 				bundlePolicy: 'max-bundle',
 				rtcpMuxPolicy: 'require',
-				sdpSemantics: 'unified-plan',
 				...additionalSettings,
 			},
 			proprietaryConstraints
@@ -256,16 +270,12 @@ export class ReactNativeUnifiedPlan extends HandlerInterface {
 		}
 	}
 
+	// eslint-disable-next-line @typescript-eslint/no-unused-vars
 	async updateIceServers(iceServers: RTCIceServer[]): Promise<void> {
 		this.assertNotClosed();
 
-		logger.debug('updateIceServers()');
-
-		const configuration = this._pc.getConfiguration();
-
-		configuration.iceServers = iceServers;
-
-		this._pc.setConfiguration(configuration);
+		// NOTE: Firefox does not implement pc.setConfiguration().
+		throw new UnsupportedError('not supported');
 	}
 
 	async restartIce(iceParameters: IceParameters): Promise<void> {
@@ -343,7 +353,7 @@ export class ReactNativeUnifiedPlan extends HandlerInterface {
 			});
 		}
 
-		const sendingRtpParameters = utils.clone<RtpParameters>(
+		const sendingRtpParameters: RtpParameters = utils.clone<RtpParameters>(
 			this._sendingRtpParametersByKind![track.kind]
 		);
 
@@ -353,9 +363,10 @@ export class ReactNativeUnifiedPlan extends HandlerInterface {
 			codec
 		);
 
-		const sendingRemoteRtpParameters = utils.clone<RtpParameters>(
-			this._sendingRemoteRtpParametersByKind![track.kind]
-		);
+		const sendingRemoteRtpParameters: RtpParameters =
+			utils.clone<RtpParameters>(
+				this._sendingRemoteRtpParametersByKind![track.kind]
+			);
 
 		// This may throw.
 		sendingRemoteRtpParameters.codecs = ortc.reduceCodecs(
@@ -363,7 +374,12 @@ export class ReactNativeUnifiedPlan extends HandlerInterface {
 			codec
 		);
 
-		const mediaSectionIdx = this._remoteSdp!.getNextMediaSectionIdx();
+		// NOTE: Firefox fails sometimes to properly anticipate the closed media
+		// section that it should use, so don't reuse closed media sections.
+		//   https://github.com/versatica/mediasoup-client/issues/104
+		//
+		// const mediaSectionIdx = this._remoteSdp!.getNextMediaSectionIdx();
+
 		const transceiver = this._pc.addTransceiver(track, {
 			direction: 'sendonly',
 			streams: [this._sendStream],
@@ -374,67 +390,31 @@ export class ReactNativeUnifiedPlan extends HandlerInterface {
 			onRtpSender(transceiver.sender);
 		}
 
-		let offer = await this._pc.createOffer();
+		const offer = await this._pc.createOffer();
 		let localSdpObject = sdpTransform.parse(offer.sdp);
-		let offerMediaObject;
 
+		// In Firefox use DTLS role client even if we are the "offerer" since
+		// Firefox does not respect ICE-Lite.
 		if (!this._transportReady) {
-			await this.setupTransport({
-				localDtlsRole: this._forcedLocalDtlsRole ?? 'client',
-				localSdpObject,
-			});
+			await this.setupTransport({ localDtlsRole: 'client', localSdpObject });
 		}
-
-		// Special case for VP9 with SVC.
-		let hackVp9Svc = false;
 
 		const layers = parseScalabilityMode((encodings || [{}])[0].scalabilityMode);
-
-		if (
-			encodings &&
-			encodings.length === 1 &&
-			layers.spatialLayers > 1 &&
-			sendingRtpParameters.codecs[0].mimeType.toLowerCase() === 'video/vp9'
-		) {
-			logger.debug('send() | enabling legacy simulcast for VP9 SVC');
-
-			hackVp9Svc = true;
-			localSdpObject = sdpTransform.parse(offer.sdp);
-			offerMediaObject = localSdpObject.media[mediaSectionIdx.idx];
-
-			sdpUnifiedPlanUtils.addLegacySimulcast({
-				offerMediaObject,
-				numStreams: layers.spatialLayers,
-			});
-
-			offer = { type: 'offer', sdp: sdpTransform.write(localSdpObject) };
-		}
 
 		logger.debug('send() | calling pc.setLocalDescription() [offer:%o]', offer);
 
 		await this._pc.setLocalDescription(offer);
 
 		// We can now get the transceiver.mid.
-		// NOTE: We cannot read generated MID on iOS react-native-webrtc 111.0.0
-		// because transceiver.mid is not available until setRemoteDescription()
-		// is called, so this is best effort.
-		// Issue: https://github.com/react-native-webrtc/react-native-webrtc/issues/1404
-		// NOTE: So let's fill MID in sendingRtpParameters later.
-		// NOTE: This is fixed in react-native-webrtc 111.0.3.
-		let localId = transceiver.mid ?? undefined;
-
-		if (!localId) {
-			logger.warn(
-				'send() | missing transceiver.mid (bug in react-native-webrtc, using a workaround'
-			);
-		}
+		const localId = transceiver.mid;
 
 		// Set MID.
-		// NOTE: As per above, it could be unset yet.
 		sendingRtpParameters.mid = localId;
 
 		localSdpObject = sdpTransform.parse(this._pc.localDescription.sdp);
-		offerMediaObject = localSdpObject.media[mediaSectionIdx.idx];
+
+		const offerMediaObject =
+			localSdpObject.media[localSdpObject.media.length - 1];
 
 		// Set RTCP CNAME.
 		sendingRtpParameters.rtcp!.cname = sdpCommonUtils.getCname({
@@ -450,16 +430,11 @@ export class ReactNativeUnifiedPlan extends HandlerInterface {
 		// Set RTP encodings by parsing the SDP offer and complete them with given
 		// one if just a single encoding has been given.
 		else if (encodings.length === 1) {
-			let newEncodings = sdpUnifiedPlanUtils.getRtpEncodings({
+			const newEncodings = sdpUnifiedPlanUtils.getRtpEncodings({
 				offerMediaObject,
 			});
 
 			Object.assign(newEncodings[0], encodings[0]);
-
-			// Hack for VP9 SVC.
-			if (hackVp9Svc) {
-				newEncodings = [newEncodings[0]];
-			}
 
 			sendingRtpParameters.encodings = newEncodings;
 		}
@@ -486,7 +461,6 @@ export class ReactNativeUnifiedPlan extends HandlerInterface {
 
 		this._remoteSdp!.send({
 			offerMediaObject,
-			reuseMid: mediaSectionIdx.reuseMid,
 			offerRtpParameters: sendingRtpParameters,
 			answerRtpParameters: sendingRemoteRtpParameters,
 			codecOptions,
@@ -502,15 +476,6 @@ export class ReactNativeUnifiedPlan extends HandlerInterface {
 
 		await this._pc.setRemoteDescription(answer);
 
-		// Follow up of iOS react-native-webrtc 111.0.0 issue told above. Now yes,
-		// we can read generated MID (if not done above) and fill sendingRtpParameters.
-		// NOTE: This is fixed in react-native-webrtc 111.0.3 so this block isn't
-		// needed starting from that version.
-		if (!localId) {
-			localId = transceiver.mid;
-			sendingRtpParameters.mid = localId;
-		}
-
 		// Store in the map.
 		this._mapMidTransceiver.set(localId, transceiver);
 
@@ -524,31 +489,34 @@ export class ReactNativeUnifiedPlan extends HandlerInterface {
 	async stopSending(localId: string): Promise<void> {
 		this.assertSendDirection();
 
+		logger.debug('stopSending() [localId:%s]', localId);
+
 		if (this._closed) {
 			return;
 		}
 
-		logger.debug('stopSending() [localId:%s]', localId);
-
 		const transceiver = this._mapMidTransceiver.get(localId);
 
 		if (!transceiver) {
-			throw new Error('associated RTCRtpTransceiver not found');
+			throw new Error('associated transceiver not found');
 		}
 
 		transceiver.sender.replaceTrack(null);
 
+		// NOTE: Cannot use stop() the transceiver due to the the note above in
+		// send() method.
+		// try
+		// {
+		// 	transceiver.stop();
+		// }
+		// catch (error)
+		// {}
+
 		this._pc.removeTrack(transceiver.sender);
-
-		const mediaSectionClosed = this._remoteSdp!.closeMediaSection(
-			transceiver.mid!
-		);
-
-		if (mediaSectionClosed) {
-			try {
-				transceiver.stop();
-			} catch (error) {}
-		}
+		// NOTE: Cannot use closeMediaSection() due to the the note above in send()
+		// method.
+		// this._remoteSdp!.closeMediaSection(transceiver.mid);
+		this._remoteSdp!.disableMediaSection(transceiver.mid!);
 
 		const offer = await this._pc.createOffer();
 
@@ -571,6 +539,7 @@ export class ReactNativeUnifiedPlan extends HandlerInterface {
 		this._mapMidTransceiver.delete(localId);
 	}
 
+	// eslint-disable-next-line @typescript-eslint/no-unused-vars
 	async pauseSending(localId: string): Promise<void> {
 		this.assertNotClosed();
 		this.assertSendDirection();
@@ -605,6 +574,7 @@ export class ReactNativeUnifiedPlan extends HandlerInterface {
 		await this._pc.setRemoteDescription(answer);
 	}
 
+	// eslint-disable-next-line @typescript-eslint/no-unused-vars
 	async resumeSending(localId: string): Promise<void> {
 		this.assertNotClosed();
 		this.assertSendDirection();
@@ -613,13 +583,12 @@ export class ReactNativeUnifiedPlan extends HandlerInterface {
 
 		const transceiver = this._mapMidTransceiver.get(localId);
 
-		this._remoteSdp!.resumeSendingMediaSection(localId);
-
 		if (!transceiver) {
 			throw new Error('associated RTCRtpTransceiver not found');
 		}
 
 		transceiver.direction = 'sendonly';
+		this._remoteSdp!.resumeSendingMediaSection(localId);
 
 		const offer = await this._pc.createOffer();
 
@@ -682,7 +651,7 @@ export class ReactNativeUnifiedPlan extends HandlerInterface {
 		const transceiver = this._mapMidTransceiver.get(localId);
 
 		if (!transceiver) {
-			throw new Error('associated RTCRtpTransceiver not found');
+			throw new Error('associated transceiver not found');
 		}
 
 		const parameters = transceiver.sender.getParameters();
@@ -817,10 +786,7 @@ export class ReactNativeUnifiedPlan extends HandlerInterface {
 			);
 
 			if (!this._transportReady) {
-				await this.setupTransport({
-					localDtlsRole: this._forcedLocalDtlsRole ?? 'client',
-					localSdpObject,
-				});
+				await this.setupTransport({ localDtlsRole: 'client', localSdpObject });
 			}
 
 			logger.debug(
@@ -855,6 +821,7 @@ export class ReactNativeUnifiedPlan extends HandlerInterface {
 	}
 
 	async receive(
+		// eslint-disable-next-line @typescript-eslint/no-unused-vars
 		optionsList: HandlerReceiveOptions[]
 	): Promise<HandlerReceiveResult[]> {
 		this.assertNotClosed();
@@ -923,15 +890,12 @@ export class ReactNativeUnifiedPlan extends HandlerInterface {
 				offerRtpParameters: rtpParameters,
 				answerMediaObject,
 			});
+
+			answer = { type: 'answer', sdp: sdpTransform.write(localSdpObject) };
 		}
 
-		answer = { type: 'answer', sdp: sdpTransform.write(localSdpObject) };
-
 		if (!this._transportReady) {
-			await this.setupTransport({
-				localDtlsRole: this._forcedLocalDtlsRole ?? 'client',
-				localSdpObject,
-			});
+			await this.setupTransport({ localDtlsRole: 'client', localSdpObject });
 		}
 
 		logger.debug(
@@ -950,16 +914,16 @@ export class ReactNativeUnifiedPlan extends HandlerInterface {
 
 			if (!transceiver) {
 				throw new Error('new RTCRtpTransceiver not found');
-			} else {
-				// Store in the map.
-				this._mapMidTransceiver.set(localId, transceiver);
-
-				results.push({
-					localId,
-					track: transceiver.receiver.track,
-					rtpReceiver: transceiver.receiver,
-				});
 			}
+
+			// Store in the map.
+			this._mapMidTransceiver.set(localId, transceiver);
+
+			results.push({
+				localId,
+				track: transceiver.receiver.track,
+				rtpReceiver: transceiver.receiver,
+			});
 		}
 
 		return results;
@@ -1080,7 +1044,6 @@ export class ReactNativeUnifiedPlan extends HandlerInterface {
 	}
 
 	async getReceiverStats(localId: string): Promise<RTCStatsReport> {
-		this.assertNotClosed();
 		this.assertRecvDirection();
 
 		const transceiver = this._mapMidTransceiver.get(localId);
@@ -1139,10 +1102,7 @@ export class ReactNativeUnifiedPlan extends HandlerInterface {
 			if (!this._transportReady) {
 				const localSdpObject = sdpTransform.parse(answer.sdp);
 
-				await this.setupTransport({
-					localDtlsRole: this._forcedLocalDtlsRole ?? 'client',
-					localSdpObject,
-				});
+				await this.setupTransport({ localDtlsRole: 'client', localSdpObject });
 			}
 
 			logger.debug(

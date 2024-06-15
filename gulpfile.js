@@ -1,7 +1,7 @@
 const pkg = require('./package.json')
 
 const {rollup} = require('rollup')
-const {terser} = require('rollup-plugin-terser')
+const terser = require('@rollup/plugin-terser').default
 const commonjs = require('@rollup/plugin-commonjs')
 const globals = require('rollup-plugin-node-globals')
 const builtins = require('rollup-plugin-node-builtins')
